@@ -1,0 +1,12 @@
+# Gate 1 config — hadolint.
+#
+# The remaining ignore covers the frontend Dockerfile's `apk add`, whose patch
+# level is inherited from the pinned base image (node:14-alpine) and refreshed
+# on every rebuild. Without it that Dockerfile fails Gate 1 for a reason we
+# have deliberately decided not to act on.
+ignored:
+  - DL3018 # apk add without version pins          (frontend/Dockerfile)
+
+# Info-level suggestions (e.g. DL3015 "use --no-install-recommends") are
+# reported but do not block — warnings and errors do.
+failure-threshold: warning

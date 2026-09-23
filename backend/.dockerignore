@@ -1,0 +1,6 @@
+# Build output — the image builds its own jar, never ship a stale host one.
+target/
+.git/
+*.iml
+.idea/
+.vscode/

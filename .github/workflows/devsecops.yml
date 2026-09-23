@@ -1,0 +1,502 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  DevSecOps Pipeline
+#  GitHub → GitHub Actions (CI) → Quay.io (registry) → ArgoCD (CD) →
+#  OpenShift SNO → Red Hat ACS
+#
+#  Stage map — the job/step names below are the check names you will see in the
+#  Actions UI, one per gate from the summary table in docs/pipeline-explained.md:
+#
+#    Gate 0  gitleaks                secrets (repo + git history)   code-gates
+#    Gate 1  hadolint + eslint        Dockerfile / code lint        code-gates
+#            + dotnet format
+#    Gate 2  npm audit +              known CVEs in dependencies    code-gates
+#            dotnet list --vulnerable
+#    Gate 3  SonarQube                SAST on our own source        code-gates
+#    —       buildah                  image, tag = commit SHA       image
+#    —       syft                     SBOM (artifact, no gate)      image
+#    Gate 4  grype (on the SBOM)      CVEs, still pre-push          image
+#    —       buildah push ghcr.io     staging registry              image
+#    Gate 5  roxctl image scan/check  ACS policies on staged image  gate5-acs
+#    —       skopeo copy → quay.io    byte-for-byte promotion       promote-quay
+#    Gate 6  Quay/Clair               automatic inside Quay         (no job)
+#    —       cosign sign + attest     signature + SBOM attestation  sign
+#    —       manifest repo commit     desired state for ArgoCD      update-manifests
+#    Gate 7  ACS Admission Controller inside the OpenShift cluster  (no job)
+#    —       ACS Sensor               runtime detection             (no job)
+#
+#  Gates 0-4 are one job (`code-gates`, `image`) on purpose: Gate 4 must run
+#  before anything leaves the runner, and a job is the unit that "left the
+#  machine". Each gate is its own *step* so the UI shows exactly which gate
+#  stopped the run.
+#
+#  Required secrets/variables: docs/devsecops-setup.md
+# ─────────────────────────────────────────────────────────────────────────────
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write # push the staging image to ghcr.io with GITHUB_TOKEN
+
+# One run per ref at a time — a newer push cancels a stale, still-scanning run.
+concurrency:
+  group: devsecops-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════
+  #  Gates 0-3 — code-level checks. Cheapest first, before any image exists.
+  # ════════════════════════════════════════════════════════════════════════
+  code-gates:
+    name: "Gates 0-3 · code"
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: Gate 0 scans git history, Gate 3 needs blame data.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # ── Gate 0 — secrets ────────────────────────────────────────────────
+      - name: "Gate 0 — gitleaks (secrets in repo + git history)"
+        uses: docker://zricethezav/gitleaks:v8.18.2
+        with:
+          # no --no-git: history is the point. --redact masks any match.
+          args: detect --redact -v
+
+      # ── Gate 1 — lint ───────────────────────────────────────────────────
+      - name: "Gate 1 — hadolint (backend Dockerfile)"
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: backend/Helaq.API/Dockerfile
+          failure-threshold: warning
+
+      - name: "Gate 1 — hadolint (frontend Dockerfile)"
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: frontend/Dockerfile
+          failure-threshold: warning
+
+      - name: "Gate 1 — eslint (frontend, ratcheted baseline)"
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+
+          # Existing debt is recorded in .eslint-baseline (215 errors, mostly
+          # react-hooks/set-state-in-effect ×119 + no-explicit-any ×41) rather
+          # than "solved" by downgrading rules: the gate fails the moment the
+          # error count exceeds the baseline, and the baseline only ever moves
+          # DOWN as the debt is paid off.
+          npx eslint --format json --output-file /tmp/eslint-report.json . || true
+          errors=$(jq '[.[] | .messages[] | select(.severity == 2)] | length' /tmp/eslint-report.json)
+          baseline=$(tr -d '[:space:]' < .eslint-baseline)
+
+          echo "eslint errors: $errors — baseline: $baseline (lower as you fix debt; never raise)"
+          echo "top offenders:"
+          jq -r '[.[] | .messages[] | select(.severity == 2) | .ruleId]
+                  | group_by(.) | map({rule: .[0], n: length}) | sort_by(-.n)[:10][]
+                  | "  \(.n)\t\(.rule)"' /tmp/eslint-report.json
+
+          if [ "$errors" -gt "$baseline" ]; then
+            echo "::error::Gate 1 failed — $errors eslint errors exceeds baseline $baseline. Run 'npm run lint' in frontend/ and fix the new errors."
+            exit 1
+          fi
+
+      - name: "Gate 1 — dotnet format (backend style/syntax)"
+        run: |
+          dotnet restore backend/backend.slnx
+          # Fix locally with:  dotnet format backend/backend.slnx
+          dotnet format backend/backend.slnx --verify-no-changes --no-restore
+
+      # ── Gate 2 — SCA ────────────────────────────────────────────────────
+      # OWASP Dependency-Check was swapped for the language-native auditors:
+      # it needs an NVD API key, is rate-limited, and reads .NET manifests
+      # poorly — while `npm audit` / `dotnet list --vulnerable` read our actual
+      # lock state. Documented in architecture.md as a deliberate substitution.
+      - name: "Gate 2 — npm audit (frontend dependencies)"
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+      - name: "Gate 2 — dotnet list --vulnerable (backend dependencies)"
+        run: |
+          dotnet list backend/backend.slnx package --vulnerable --include-transitive | tee /tmp/vulnerable.txt
+          # `dotnet list` always exits 0 — any CVE/GHSA line is the gate signal.
+          if grep -qE 'CVE-|GHSA-' /tmp/vulnerable.txt; then
+            echo "::error file=backend/backend.slnx::Gate 2 failed — vulnerable .NET packages (fix = version bump):"
+            cat /tmp/vulnerable.txt
+            exit 1
+          fi
+
+      # ── Gate 3 — SAST ──────────────────────────────────────────────────
+      - name: "Gate 3 — preflight (SonarQube configured?)"
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -z "$SONAR_HOST_URL" ] || [ -z "$SONAR_TOKEN" ]; then
+            echo "::error::Gate 3 needs secrets SONAR_HOST_URL + SONAR_TOKEN — see docs/devsecops-setup.md"
+            exit 1
+          fi
+
+      - name: Setup Java (SonarScanner for .NET needs a JRE)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install SonarScanner for .NET
+        run: |
+          dotnet tool install -g dotnet-sonarscanner
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: "Gate 3 — SonarQube (SAST, quality gate must pass)"
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+        run: |
+          KEY="${SONAR_PROJECT_KEY:-$(echo '${{ github.repository }}' | tr '/:' '__')}"
+          ARGS=(
+            begin /k:"$KEY"
+            /d:sonar.host.url="$SONAR_HOST_URL"
+            /d:sonar.token="$SONAR_TOKEN"
+            /d:sonar.projectBaseDir="$GITHUB_WORKSPACE"
+            /d:sonar.sources=.
+            "/d:sonar.exclusions=**/node_modules/**,**/bin/**,**/obj/**,**/.next/**,**/wwwroot/lib/**,**/swagger.json,**/k6-tests/**"
+            # blocks the pipeline on a failed Quality Gate — this is the gate
+            /d:sonar.qualitygate.wait=true
+          )
+          [ -n "$SONAR_ORGANIZATION" ] && ARGS+=("/d:sonar.organization=$SONAR_ORGANIZATION")
+
+          dotnet sonar "${ARGS[@]}"
+          dotnet build backend/backend.slnx -c Release --no-restore
+          dotnet sonar end
+
+  # ════════════════════════════════════════════════════════════════════════
+  #  Build → SBOM → Gate 4 → staging push (GHCR).
+  #  Everything through Gate 4 runs on one runner: when Grype passes, *then*
+  #  the image leaves the machine for the first time.
+  # ════════════════════════════════════════════════════════════════════════
+  image:
+    name: "Build · SBOM · Gate 4 · stage (${{ matrix.component }})"
+    runs-on: ubuntu-latest
+    needs: code-gates
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: backend
+            image: helaq-api
+            context: ./backend
+            dockerfile: ./backend/Helaq.API/Dockerfile
+          - component: frontend
+            image: helaq-frontend
+            context: ./frontend
+            dockerfile: ./frontend/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install buildah + syft + grype
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y buildah
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh  | sudo sh -s -- -b /usr/local/bin
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sudo sh -s -- -b /usr/local/bin
+          syft version
+          grype version
+
+      # ── Build — buildah, tag = commit SHA (never `latest`) ─────────────
+      - name: "Build — buildah ${{ matrix.image }}:${{ github.sha }}"
+        run: |
+          # sudo because GitHub-hosted runners have no subuid range for the
+          # `runner` user — rootless buildah refuses to start without one.
+          sudo buildah bud --layers --format oci \
+            -f "${{ matrix.dockerfile }}" \
+            -t "${{ matrix.image }}:${{ github.sha }}" \
+            "${{ matrix.context }}"
+
+      # ── SBOM — syft (artifact step, not a gate) ────────────────────────
+      - name: "SBOM — syft (artifact, feeds Gate 4 + cosign)"
+        run: |
+          sudo buildah push "${{ matrix.image }}:${{ github.sha }}" \
+            "docker-archive:/tmp/${{ matrix.image }}.tar"
+          sudo chown "$USER:$USER" "/tmp/${{ matrix.image }}.tar"
+
+          syft "docker-archive:/tmp/${{ matrix.image }}.tar" \
+            -o "spdx-json=/tmp/sbom-${{ matrix.image }}.spdx.json"
+          echo "SBOM packages: $(jq '.packages | length' "/tmp/sbom-${{ matrix.image }}.spdx.json")"
+
+      # ── Gate 4 — Grype on the SBOM, before any push ────────────────────
+      # Grype instead of `roxctl image scan` here: ACS queries a registry it
+      # has an integration for, and nothing has been pushed yet. See
+      # architecture.md — deliberate substitution, not an oversight.
+      - name: "Gate 4 — grype (CVE scan of the SBOM, pre-push)"
+        run: |
+          grype "sbom:/tmp/sbom-${{ matrix.image }}.spdx.json" \
+            --fail-on high \
+            -o table \
+            -o "json=/tmp/grype-${{ matrix.image }}.json"
+
+      - name: Upload evidence (SBOM + Grype report)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.component }}-${{ github.sha }}
+          path: |
+            /tmp/sbom-${{ matrix.image }}.spdx.json
+            /tmp/grype-${{ matrix.image }}.json
+          retention-days: 30
+
+      # ── Push to staging registry (GHCR) — first time bytes leave ──────
+      - name: "Push to staging registry — ghcr.io (GITHUB_TOKEN)"
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          echo "$GHCR_TOKEN" | sudo buildah login --username "${{ github.actor }}" --password-stdin ghcr.io
+          sudo buildah push "${{ matrix.image }}:${{ github.sha }}" \
+            "ghcr.io/${OWNER,,}/${{ matrix.image }}:${{ github.sha }}"
+
+  # ════════════════════════════════════════════════════════════════════════
+  #  Gate 5 — ACS policy check against the staged image in ghcr.io.
+  #  Prerequisite: an Image Integration for ghcr.io in ACS Central, otherwise
+  #  this fails with "no matching image registries found" (documented error).
+  # ════════════════════════════════════════════════════════════════════════
+  gate5-acs:
+    name: "Gate 5 — ACS (${{ matrix.component }})"
+    runs-on: ubuntu-latest
+    needs: image
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: backend
+            image: helaq-api
+          - component: frontend
+            image: helaq-frontend
+    steps:
+      - name: "Gate 5 — preflight (ACS configured?)"
+        env:
+          ROX_CENTRAL_ENDPOINT: ${{ secrets.ROX_CENTRAL_ENDPOINT }}
+          ROX_API_TOKEN: ${{ secrets.ROX_API_TOKEN }}
+        run: |
+          if [ -z "$ROX_CENTRAL_ENDPOINT" ] || [ -z "$ROX_API_TOKEN" ]; then
+            echo "::error::Gate 5 needs secrets ROX_CENTRAL_ENDPOINT (host:443, no https://) + ROX_API_TOKEN — see docs/devsecops-setup.md"
+            exit 1
+          fi
+
+      - name: Install roxctl (downloaded from Central itself)
+        env:
+          ROX_CENTRAL_ENDPOINT: ${{ secrets.ROX_CENTRAL_ENDPOINT }}
+          ROX_API_TOKEN: ${{ secrets.ROX_API_TOKEN }}
+        run: |
+          curl -fsSL -H "Authorization: Bearer $ROX_API_TOKEN" \
+            "https://$ROX_CENTRAL_ENDPOINT/api/cli/download/roxctl-linux" \
+            -o /tmp/roxctl
+          chmod +x /tmp/roxctl
+          sudo mv /tmp/roxctl /usr/local/bin/roxctl
+          roxctl version
+
+      - name: "Gate 5 — roxctl image scan + image check (GHCR staged image)"
+        env:
+          OWNER: ${{ github.repository_owner }}
+          ROX_CENTRAL_ENDPOINT: ${{ secrets.ROX_CENTRAL_ENDPOINT }}
+          ROX_API_TOKEN: ${{ secrets.ROX_API_TOKEN }}
+          # set repository variable ROX_SKIP_TLS_VERIFY=true for a self-signed Central
+          ROX_INSECURE_CLIENT_SKIP_TLS_VERIFY: ${{ vars.ROX_SKIP_TLS_VERIFY || 'false' }}
+        run: |
+          IMAGE="ghcr.io/${OWNER,,}/${{ matrix.image }}:${{ github.sha }}"
+
+          # scan: forces Central to pull + analyse the staged image — a second,
+          # independent CVE source next to Grype.
+          roxctl image scan --endpoint "$ROX_CENTRAL_ENDPOINT" --image "$IMAGE" --output table
+
+          # check: the full policy set — CVEs *plus* deploy-time configuration
+          # risks Grype never evaluates (privileged, root, missing limits…).
+          roxctl image check --endpoint "$ROX_CENTRAL_ENDPOINT" --image "$IMAGE" --output table
+
+  # ════════════════════════════════════════════════════════════════════════
+  #  Promote to Quay — skopeo copy, no rebuild: the exact bytes that passed
+  #  every gate land in the registry the cluster pulls from.
+  #  (Gate 6 = Quay's own Clair scan starts the moment the image arrives.)
+  # ════════════════════════════════════════════════════════════════════════
+  promote-quay:
+    name: "Promote — Quay (${{ matrix.component }})"
+    runs-on: ubuntu-latest
+    needs: gate5-acs
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: backend
+            image: helaq-api
+          - component: frontend
+            image: helaq-frontend
+    steps:
+      - name: "Promote — preflight (Quay configured?)"
+        env:
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+        run: |
+          if [ -z "$QUAY_USERNAME" ] || [ -z "$QUAY_PASSWORD" ]; then
+            echo "::error::Promotion needs secrets QUAY_USERNAME + QUAY_PASSWORD (Quay robot account) — see docs/devsecops-setup.md"
+            exit 1
+          fi
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: "skopeo copy ghcr.io → quay.io (byte-for-byte, no rebuild)"
+        env:
+          OWNER: ${{ github.repository_owner }}
+          QUAY_ORG: ${{ vars.QUAY_ORG || github.repository_owner }}
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+        run: |
+          SRC="ghcr.io/${OWNER,,}/${{ matrix.image }}:${{ github.sha }}"
+          DST="quay.io/${QUAY_ORG,,}/${{ matrix.image }}:${{ github.sha }}"
+
+          echo "$QUAY_PASSWORD" | skopeo login --username "$QUAY_USERNAME" --password-stdin quay.io
+          skopeo copy --all "docker://$SRC" "docker://$DST"
+
+  # ════════════════════════════════════════════════════════════════════════
+  #  Sign + attach SBOM (cosign) — turns a chain of scans into a claim about
+  #  one specific, unmodified image.
+  # ════════════════════════════════════════════════════════════════════════
+  sign:
+    name: "Sign + SBOM attest (${{ matrix.component }})"
+    runs-on: ubuntu-latest
+    needs: promote-quay
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: backend
+            image: helaq-api
+          - component: frontend
+            image: helaq-frontend
+    steps:
+      - name: "Sign — preflight (cosign key configured?)"
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          if [ -z "$COSIGN_PRIVATE_KEY" ] || [ -z "$COSIGN_PASSWORD" ]; then
+            echo "::error::Signing needs secrets COSIGN_PRIVATE_KEY + COSIGN_PASSWORD — see docs/devsecops-setup.md"
+            exit 1
+          fi
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Download SBOM evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-${{ matrix.component }}-${{ github.sha }}
+          path: /tmp/evidence
+
+      - name: Write cosign private key
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$COSIGN_PRIVATE_KEY" > /tmp/cosign.key
+
+      - name: "cosign sign + attach SBOM attestation (Quay)"
+        env:
+          QUAY_ORG: ${{ vars.QUAY_ORG || github.repository_owner }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          IMG="quay.io/${QUAY_ORG,,}/${{ matrix.image }}:${{ github.sha }}"
+
+          cosign sign --key /tmp/cosign.key \
+            -a "commit=${{ github.sha }}" \
+            -a "repo=${{ github.repository }}" \
+            --yes "$IMG"
+
+          cosign attest --key /tmp/cosign.key \
+            --type spdxjson \
+            --predicate "/tmp/evidence/sbom-${{ matrix.image }}.spdx.json" \
+            --yes "$IMG"
+
+  # ════════════════════════════════════════════════════════════════════════
+  #  Update the manifest repo — the *only* thing CI writes outside itself.
+  #  GitHub Actions never gets cluster credentials: ArgoCD (in-cluster) does
+  #  the apply, and Gate 7 re-checks there. main branch only — a dev push
+  #  must not re-deploy the cluster.
+  # ════════════════════════════════════════════════════════════════════════
+  update-manifests:
+    name: "GitOps — update manifest repo"
+    runs-on: ubuntu-latest
+    needs: sign
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: "GitOps — preflight (manifest repo configured?)"
+        env:
+          MANIFEST_REPO: ${{ vars.MANIFEST_REPO }}
+          MANIFEST_PAT: ${{ secrets.MANIFEST_PAT || secrets.GH_PAT }}
+        run: |
+          if [ -z "$MANIFEST_REPO" ]; then
+            echo "::error::Set repository variable MANIFEST_REPO (owner/name of the GitOps repo) — see docs/devsecops-setup.md"
+            exit 1
+          fi
+          if [ -z "$MANIFEST_PAT" ]; then
+            echo "::error::Set secret MANIFEST_PAT (PAT with write access to $MANIFEST_REPO)"
+            exit 1
+          fi
+
+      - name: Checkout manifest repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.MANIFEST_REPO }}
+          token: ${{ secrets.MANIFEST_PAT || secrets.GH_PAT }}
+          path: manifests
+
+      - name: Point manifests at the new commit-SHA tag
+        env:
+          MANIFEST_REPO: ${{ vars.MANIFEST_REPO }}
+        run: |
+          K=manifests/kustomization.yaml
+          if [ ! -f "$K" ]; then
+            echo "::error::$K not found in $MANIFEST_REPO — seed it from gitops/ (see gitops/README.md)"
+            exit 1
+          fi
+          # Both app images are rebuilt from the same commit, so rewriting every
+          # newTag: line is correct. Do not use newTag: for anything else.
+          sed -i "s/newTag: .*/newTag: ${{ github.sha }}/" "$K"
+          grep -n "newTag" "$K"
+
+      - name: "Commit desired state (ArgoCD picks this up)"
+        working-directory: manifests
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Tag already points at ${{ github.sha }} — nothing to do."
+          else
+            git commit -m "deploy: ${{ github.sha }} — passed all gates, signed, promoted to Quay"
+            git push
+          fi

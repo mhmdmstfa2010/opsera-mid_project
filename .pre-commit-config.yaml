@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Stage 0 — pre-commit (local, developer machine, optional)
+#
+#  Fastest possible feedback: the developer sees problems in seconds instead
+#  of waiting for CI. NOT a security boundary — `git commit --no-verify`
+#  bypasses it, which is why CI repeats these same checks as real gates
+#  (Gate 0 = gitleaks, Gate 1 = hadolint). See docs/pipeline-explained.md § 0.
+#
+#  Install once per clone:
+#      pip install pre-commit
+#      pre-commit install
+#  Run manually over everything:
+#      pre-commit run --all-files
+#
+#  Both hooks run pinned tool containers via Docker, so nothing has to be
+#  installed except Docker + pre-commit itself.
+# ─────────────────────────────────────────────────────────────────────────────
+repos:
+  - repo: local
+    hooks:
+      # Secrets — staged content only (full git history is Gate 0's job in CI)
+      - id: gitleaks
+        name: gitleaks (secrets scan)
+        language: system
+        entry: docker run --rm -v "$PWD":/repo -w /repo zricethezav/gitleaks:v8.18.2 protect --staged --redact
+        pass_filenames: false
+        types: [text]
+
+      # Dockerfile lint — same config (.hadolint.yaml) Gate 1 uses in CI
+      - id: hadolint
+        name: hadolint (Dockerfile lint)
+        language: system
+        entry: bash -c 'for f in backend/Dockerfile frontend/Dockerfile; do docker run --rm -i -v "$PWD":/src:ro -w /src hadolint/hadolint < "/src/$f" || exit 1; done'
+        pass_filenames: false
+        types: [dockerfile]
