@@ -399,11 +399,18 @@ jobs:
       # ACS/roxctl needs a registry reference to scan — it queries the
       # registry for image metadata rather than reading local layers, so a
       # true registry-free pre-push scan has to use Grype here instead.
+      #
+      # v4 is pinned to Grype 0.80.0, which only understands the grype-db
+      # schema v5 feed. That schema reached EOL on 2026-03-06, so v4 can only
+      # ever fetch a DB that is now ~28 weeks old — which Grype then rejects
+      # as invalid while scan-action reports the run as "Found vulnerabilities
+      # with level 'high' or higher". That is a phantom result, not a real
+      # finding. v7 installs a current Grype that reads the live DB feed.
       - name: Scan SBOM with Grype
         id: grype
         if: steps.syft.outcome == 'success'
         continue-on-error: true
-        uses: anchore/scan-action@v4
+        uses: anchore/scan-action@v7
         with:
           sbom: sbom-${{ matrix.component }}.json
           fail-build: true

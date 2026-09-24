@@ -106,3 +106,8 @@ dist
 # Local CI/scan artifacts (CI downloads these as fresh artifacts)
 coverage-raw/
 .scannerwork/
+
+# One-off EC2 provisioning scripts (run manually on the server, not part of the app)
+bootstrap-sonarqube-rhel.sh
+run-sonarqube-rhel10.sh
+configure-ci-token.sh
