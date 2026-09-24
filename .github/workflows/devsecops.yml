@@ -73,7 +73,9 @@ jobs:
       - name: Hadolint — backend Dockerfile
         id: hadolint-backend
         continue-on-error: true
-        uses: hadolint/hadolint-action@v3
+        # NOTE: this repo publishes only exact tags (v3.0.0 … v3.5.0) —
+        # there is no floating v3 tag, so @v3 fails at job setup.
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: backend/Dockerfile
           output-file: hadolint-backend.json
@@ -82,7 +84,7 @@ jobs:
       - name: Hadolint — frontend Dockerfile
         id: hadolint-frontend
         continue-on-error: true
-        uses: hadolint/hadolint-action@v3
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: frontend/Dockerfile
           output-file: hadolint-frontend.json
