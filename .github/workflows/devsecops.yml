@@ -492,11 +492,17 @@ jobs:
       # Unlike Quay, Docker Hub does not scan pushed images automatically
       # on a free/personal plan, so this has to be an explicit step here
       # rather than something that "just happens" after the push.
+      # Pinned deliberately, same reason as roxctl above: the unpinned
+      # installer pulls whatever Docker published most recently, and Scout
+      # renamed --ignore-unfixed to --only-fixed. An unpinned CLI broke this
+      # gate on Docker's release cadence rather than ours.
       - name: Install Docker Scout
         id: scout-setup
         if: steps.promote-dockerhub.outcome == 'success'
         continue-on-error: true
-        run: curl -sSfL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh -s --
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh -s -- -b "$HOME/.docker/cli-plugins"
+          docker scout version
 
       - name: Gate 6 — Docker Scout CVE scan
         id: scout-scan
@@ -506,8 +512,11 @@ jobs:
           DOCKER_SCOUT_HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKER_SCOUT_HUB_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
+          # --only-fixed (formerly --ignore-unfixed) keeps this gate in parity
+          # with Grype's only-fixed: true: fail on fixable High+ CVEs, report
+          # unfixable ones without blocking, since no upstream patch exists.
           docker scout cves "${{ steps.promote-dockerhub.outputs.final_image }}" \
-            --exit-code --only-severity critical,high --ignore-unfixed \
+            --exit-code --only-severity critical,high --only-fixed \
             --output scout-${{ matrix.component }}.json --format sarif
 
       # ---- Sign the promoted image + attach the SBOM as an attestation ----
