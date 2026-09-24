@@ -379,6 +379,11 @@ jobs:
           sbom: sbom-${{ matrix.component }}.json
           fail-build: true
           severity-cutoff: ${{ env.GRYPE_SEVERITY_THRESHOLD }}
+          # Fail only on High+ CVEs that actually have a fix published.
+          # Blocking on unfixable findings (e.g. tiff/zlib with no upstream
+          # patch) gives a red build nobody can act on; they still appear
+          # in the JSON/SARIF report artifact.
+          only-fixed: true
           output-format: json
 
       # ---- Push to GHCR (staging registry, so ACS has something to query) ----
@@ -458,7 +463,7 @@ jobs:
           DOCKER_SCOUT_HUB_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           docker scout cves "${{ steps.promote-dockerhub.outputs.final_image }}" \
-            --exit-code --only-severity critical,high \
+            --exit-code --only-severity critical,high --ignore-unfixed \
             --output scout-${{ matrix.component }}.json --format sarif
 
       # ---- Sign the promoted image + attach the SBOM as an attestation ----

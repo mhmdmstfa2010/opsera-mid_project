@@ -8,8 +8,8 @@ React UI → Spring Boot REST API → MongoDB, built, scanned, signed and releas
 through 7 security gates on every push.
 
 [![CI](https://github.com/mhmdmstfa2010/opsera-mid_project/actions/workflows/devsecops.yml/badge.svg)](https://github.com/mhmdmstfa2010/opsera-mid_project/actions/workflows/devsecops.yml)
-![Java](https://img.shields.io/badge/Java-11-E76F00?logo=openjdk&logoColor=white)
-![Spring Boot](https://img.shields.io/badge/Spring_Boot-2.5.6-6DB33F?logo=springboot&logoColor=white)
+![Java](https://img.shields.io/badge/Java-17-E76F00?logo=openjdk&logoColor=white)
+![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.5.16-6DB33F?logo=springboot&logoColor=white)
 ![React](https://img.shields.io/badge/React-17-61DAFB?logo=react&logoColor=black)
 ![MongoDB](https://img.shields.io/badge/MongoDB-4.4-47A248?logo=mongodb&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -63,8 +63,8 @@ flowchart LR
 
     subgraph Docker["docker-compose network: sliit-docker"]
         direction LR
-        FE["<b>frontend</b><br/>React 17 · CRA<br/>node:14-alpine<br/>:3000"]
-        BE["<b>backend</b><br/>Spring Boot 2.5 · Java 11<br/>multi-stage JRE image<br/>:8080"]
+        FE["<b>frontend</b><br/>React 17 · CRA static build<br/>nginx:alpine<br/>:3000"]
+        BE["<b>backend</b><br/>Spring Boot 3.5 · Java 17<br/>multi-stage JRE image<br/>:8080"]
         DB[("<b>mongodb</b><br/>mongo:latest<br/>volume: mongodb<br/>:27017")]
     end
 
@@ -115,7 +115,7 @@ opsera-mid_project/
 | Layer     | Technology |
 | --------- | ---------- |
 | Frontend  | React 17, React Router 6, React Bootstrap, Axios, react-toastify |
-| Backend   | Java 11, Spring Boot 2.5 (Web, Data MongoDB, Lombok), Maven (`./mvnw`) |
+| Backend   | Java 17, Spring Boot 3.5 (Web, Data MongoDB, Lombok), Maven (`./mvnw`) |
 | Database  | MongoDB (`mydb`) |
 | Packaging | Docker multi-stage builds, Docker Compose |
 | Quality   | SonarQube, JaCoCo, Checkstyle (Google style), ESLint, Hadolint, gitleaks |
@@ -129,7 +129,7 @@ opsera-mid_project/
 ### Prerequisites
 
 - Docker + Docker Compose
-- (local dev only) JDK 11+ and Node 18+
+- (local dev only) JDK 17+ and Node 20+
 
 ### 1. Docker Compose — recommended
 
@@ -166,8 +166,11 @@ cd backend
 ```bash
 cd frontend
 npm ci
-npm start                  # http://localhost:3000
+# react-scripts 4 (webpack 4) needs the legacy OpenSSL provider on Node 17+
+NODE_OPTIONS=--openssl-legacy-provider npm start   # http://localhost:3000
 ```
+
+(In Docker this is set in the Dockerfile; only host-side dev needs the flag.)
 
 ---
 
@@ -280,7 +283,7 @@ flowchart TD
 | 2 | `sonarqube`           | SonarQube scan + Quality Gate    | quality gate not `OK` |
 | 3 | `build-scan-push-sign`| Docker build                     | build error |
 | — |                       | Syft                             | SBOM generation failure |
-| 4 |                       | Grype                            | CVEs ≥ `high` |
+| 4 |                       | Grype                            | fixable CVEs ≥ `high` |
 | — |                       | Docker login + push              | GHCR push failure |
 | 5 |                       | ACS `roxctl image check`         | policy violation |
 | —                       | skopeo promote                  | Docker Hub copy failure |

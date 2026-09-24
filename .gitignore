@@ -102,3 +102,7 @@ dist
 
 # TernJS port file
 .tern-port
+
+# Local CI/scan artifacts (CI downloads these as fresh artifacts)
+coverage-raw/
+.scannerwork/

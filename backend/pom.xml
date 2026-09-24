@@ -5,7 +5,10 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>2.5.6</version>
+        <!-- 2.5.6 (2021) carried 67 High/Critical advisories (Spring 5.3.12,
+             Tomcat 9.0.54, Jackson 2.12.5, logback 1.2.6) that failed Gate 4
+             (Grype) with no fix short of an upgrade. Boot 3.5 needs Java 17. -->
+        <version>3.5.16</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
     <groupId>com.sliit.cc</groupId>
@@ -14,7 +17,14 @@
     <name>student-service</name>
     <description>Demo project for Spring Boot</description>
     <properties>
-        <java.version>11</java.version>
+        <!-- Spring Boot 3.x requires Java 17; CI (setup-java) already builds with 17. -->
+        <java.version>17</java.version>
+        <!-- Boot 3.5.16 pins tomcat 10.1.55, which has 3 Critical advisories
+             fixed in 10.1.58 — Gate 4 (Grype, fixable >= high) fails on them. -->
+        <tomcat.version>10.1.60</tomcat.version>
+        <!-- clear the last fixable Mediums so the SBOM is clean at every level -->
+        <jackson-bom.version>2.21.5</jackson-bom.version>
+        <log4j2.version>2.25.5</log4j2.version>
     </properties>
     <dependencies>
         <dependency>
@@ -35,7 +45,9 @@
         <dependency>
             <groupId>org.codehaus.jettison</groupId>
             <artifactId>jettison</artifactId>
-            <version>1.4.1</version>
+            <!-- used directly by StudentRestController (JSONObject); 1.4.1 had
+                 4 High advisories, fixed in the 1.5.x line -->
+            <version>1.5.7</version>
         </dependency>
 
         <dependency>
