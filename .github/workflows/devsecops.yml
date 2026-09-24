@@ -262,6 +262,35 @@ jobs:
           echo "SONAR_HOST_URL=$CLEAN" >> "$GITHUB_ENV"
           echo "using SONAR_HOST_URL=$CLEAN"
 
+      # Fail fast and loudly if the tunnel or the token is the problem.
+      # Without this, an unreachable tunnel (e.g. a tunnel provider's
+      # bandwidth/rate limit) returns HTTP 403, and sonar-scanner reports
+      # "You're not authorized to analyze this project" — which looks
+      # exactly like a bad token and sends debugging in the wrong direction.
+      - name: Verify SonarQube reachability and token
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          code=$(curl -sS -o /tmp/sq-status.json -w '%{http_code}' \
+            --max-time 30 "$SONAR_HOST_URL/api/system/status" || true)
+          if [ "$code" != "200" ]; then
+            echo "::error::SonarQube is not reachable at SONAR_HOST_URL (HTTP $code)."
+            echo "Tunnel providers cap bandwidth/rate limits; a dead tunnel fails here, not in the scan."
+            head -c 500 /tmp/sq-status.json 2>/dev/null || true
+            echo
+            exit 1
+          fi
+          echo "SonarQube reachable: $(cat /tmp/sq-status.json)"
+
+          vcode=$(curl -sS -o /tmp/sq-auth.json -w '%{http_code}' --max-time 30 \
+            -H "Authorization: Bearer $SONAR_TOKEN" \
+            "$SONAR_HOST_URL/api/authentication/validate" || true)
+          if [ "$vcode" != "200" ] || ! grep -q '"valid":true' /tmp/sq-auth.json; then
+            echo "::error::SONAR_TOKEN was rejected by SonarQube (HTTP $vcode): $(cat /tmp/sq-auth.json 2>/dev/null)"
+            exit 1
+          fi
+          echo "SONAR_TOKEN accepted"
+
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
