@@ -58,7 +58,7 @@ security-first pipeline:
 ```mermaid
 flowchart LR
     subgraph Browser[" "]
-        U["🌐 User<br/>(React SPA)"]
+        U["User<br/>(React SPA)"]
     end
 
     subgraph Docker["docker-compose network: sliit-docker"]
@@ -252,24 +252,24 @@ triggered on pushes to `main` / `develop` and on pull requests.
 
 ```mermaid
 flowchart TD
-    A["push / PR"] --> G1["🔒 Gate 0 — gitleaks<br/>secret detection"]
-    A --> G2["🧹 Gate 1 — lint<br/>hadolint · checkstyle · eslint"]
-    A --> T["🧪 Test<br/>JUnit + JaCoCo · Jest + lcov"]
+    A["push / PR"] --> G1["Gate 0: gitleaks<br/>secret detection"]
+    A --> G2["Gate 1: lint<br/>hadolint · checkstyle · eslint"]
+    A --> T["Test<br/>JUnit + JaCoCo · Jest + lcov"]
 
-    G1 --> S["🎯 Gate 2 — SonarQube<br/>quality gate must pass"]
+    G1 --> S["Gate 2: SonarQube<br/>quality gate must pass"]
     G2 --> S
     T --> S
 
-    S --> B["📦 Build image<br/>(backend | frontend matrix)"]
-    B --> SBOM["🧾 Syft SBOM"]
-    SBOM --> GR["🛡 Gate 4 — Grype<br/>CVE scan on SBOM"]
-    GR --> PUSH["⬆ Push to GHCR (staging)"]
-    PUSH --> ACS["🏛 Gate 5 — ACS policy check"]
-    ACS --> PROMO["🔁 Promote to Docker Hub<br/>byte-for-byte, no rebuild"]
-    PROMO --> SCOUT["🔍 Gate 6 — Docker Scout<br/>CRITICAL/HIGH CVEs"]
-    SCOUT --> SIGN["✍ cosign sign + attach SBOM"]
-    SIGN --> M["📜 Update GitOps manifest repo<br/>bump image tag"]
-    M --> ARGO["☸ ArgoCD syncs the cluster"]
+    S --> B["Build image<br/>(backend | frontend matrix)"]
+    B --> SBOM["Syft SBOM"]
+    SBOM --> GR["Gate 4: Grype<br/>CVE scan on SBOM"]
+    GR --> PUSH["Push to GHCR (staging)"]
+    PUSH --> ACS["Gate 5: ACS policy check"]
+    ACS --> PROMO["Promote to Docker Hub<br/>byte-for-byte, no rebuild"]
+    PROMO --> SCOUT["Gate 6: Docker Scout<br/>CRITICAL/HIGH CVEs"]
+    SCOUT --> SIGN["cosign sign + attach SBOM"]
+    SIGN --> M["Update GitOps manifest repo<br/>bump image tag"]
+    M --> ARGO["ArgoCD syncs the cluster"]
 ```
 
 | # | Gate / job            | Tooling                          | Fails on |
@@ -288,7 +288,7 @@ flowchart TD
 | — |                       | cosign                           | signing failure |
 | 4 | `update-manifest`     | git + ArgoCD (indirect)          | manifest push rejected |
 
-Each job writes a human-readable ✅/❌ line to the job summary and archives
+Each job writes a human-readable pass/fail line to the job summary and archives
 its raw report as an artifact (`gitleaks-report`, `lint-report`,
 `test-report`, `coverage-raw`, `sonarqube-report`,
 `build-scan-push-sign-<component>-report`).
