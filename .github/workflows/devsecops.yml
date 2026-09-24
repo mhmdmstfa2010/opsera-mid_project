@@ -245,6 +245,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Secrets pasted into GitHub can carry stray leading/trailing
+      # whitespace. The scanner tolerates it, but the quality-gate
+      # action builds a URL with curl and dies with
+      # "curl: (3) URL rejected: Malformed input to a URL function".
+      # Strip all whitespace once, here, and let later steps inherit it.
+      - name: Normalise SONAR_HOST_URL
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          CLEAN=$(printf '%s' "$SONAR_HOST_URL" | tr -d '[:space:]')
+          if [ -z "$CLEAN" ]; then
+            echo "::error::SONAR_HOST_URL secret is empty"
+            exit 1
+          fi
+          echo "SONAR_HOST_URL=$CLEAN" >> "$GITHUB_ENV"
+          echo "using SONAR_HOST_URL=$CLEAN"
+
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
@@ -268,8 +285,10 @@ jobs:
         continue-on-error: true
         uses: SonarSource/sonarqube-scan-action@v4
         env:
+          # SONAR_TOKEN only — SONAR_HOST_URL comes from $GITHUB_ENV
+          # (already whitespace-stripped by the normalise step above;
+          # a step-level env here would shadow the cleaned value).
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           args: >
             -Dsonar.projectKey=opsera-mid_project
@@ -285,7 +304,6 @@ jobs:
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
       - name: Archive report
         if: always()
