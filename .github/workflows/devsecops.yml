@@ -533,12 +533,21 @@ jobs:
         env:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
-          cosign sign --key cosign.key --yes "${{ steps.promote-dockerhub.outputs.final_image }}" \
-            --registry-creds "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_TOKEN }}"
+          # cosign 2.x removed --registry-creds; it resolves registry
+          # credentials from the ambient docker config. Logging in first also
+          # keeps the token out of argv, where it would be visible in the
+          # process list and echoed by any shell tracing.
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" \
+            | docker login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+          # printf, not echo: a secret pasted with a trailing newline would
+          # otherwise corrupt the PEM and fail key parsing with a vague error.
+          printf '%s\n' "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
+          cosign sign --key cosign.key --yes "${{ steps.promote-dockerhub.outputs.final_image }}"
           cosign attach sbom --sbom sbom-${{ matrix.component }}.json \
             "${{ steps.promote-dockerhub.outputs.final_image }}"
           rm -f cosign.key
+          docker logout docker.io
 
       - name: Set job output (final image ref)
         id: set-output
