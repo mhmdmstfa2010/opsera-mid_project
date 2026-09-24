@@ -22,7 +22,9 @@ repos:
       - id: gitleaks
         name: gitleaks (secrets scan)
         language: system
-        entry: docker run --rm -v "$PWD":/repo -w /repo zricethezav/gitleaks:v8.18.2 protect --staged --redact
+        # Wrapped in `bash -c`: language: system runs the entry directly with
+        # no shell, so "$PWD" would otherwise be passed through literally.
+        entry: bash -c 'docker run --rm -v "$PWD":/repo -w /repo zricethezav/gitleaks:v8.18.2 protect --staged --redact'
         pass_filenames: false
         types: [text]
 
@@ -30,6 +32,8 @@ repos:
       - id: hadolint
         name: hadolint (Dockerfile lint)
         language: system
-        entry: bash -c 'for f in backend/Dockerfile frontend/Dockerfile; do docker run --rm -i -v "$PWD":/src:ro -w /src hadolint/hadolint < "/src/$f" || exit 1; done'
+        # The stdin redirect must read a HOST path ($f, repo-relative) — /src
+        # only exists inside the container, so < "/src/$f" failed on the host.
+        entry: bash -c 'for f in backend/Dockerfile frontend/Dockerfile; do docker run --rm -i -v "$PWD":/src:ro -w /src hadolint/hadolint < "$f" || exit 1; done'
         pass_filenames: false
         types: [dockerfile]

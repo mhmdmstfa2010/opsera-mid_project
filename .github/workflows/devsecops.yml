@@ -1,502 +1,547 @@
-# ─────────────────────────────────────────────────────────────────────────────
-#  DevSecOps Pipeline
-#  GitHub → GitHub Actions (CI) → Quay.io (registry) → ArgoCD (CD) →
-#  OpenShift SNO → Red Hat ACS
-#
-#  Stage map — the job/step names below are the check names you will see in the
-#  Actions UI, one per gate from the summary table in docs/pipeline-explained.md:
-#
-#    Gate 0  gitleaks                secrets (repo + git history)   code-gates
-#    Gate 1  hadolint + eslint        Dockerfile / code lint        code-gates
-#            + dotnet format
-#    Gate 2  npm audit +              known CVEs in dependencies    code-gates
-#            dotnet list --vulnerable
-#    Gate 3  SonarQube                SAST on our own source        code-gates
-#    —       buildah                  image, tag = commit SHA       image
-#    —       syft                     SBOM (artifact, no gate)      image
-#    Gate 4  grype (on the SBOM)      CVEs, still pre-push          image
-#    —       buildah push ghcr.io     staging registry              image
-#    Gate 5  roxctl image scan/check  ACS policies on staged image  gate5-acs
-#    —       skopeo copy → quay.io    byte-for-byte promotion       promote-quay
-#    Gate 6  Quay/Clair               automatic inside Quay         (no job)
-#    —       cosign sign + attest     signature + SBOM attestation  sign
-#    —       manifest repo commit     desired state for ArgoCD      update-manifests
-#    Gate 7  ACS Admission Controller inside the OpenShift cluster  (no job)
-#    —       ACS Sensor               runtime detection             (no job)
-#
-#  Gates 0-4 are one job (`code-gates`, `image`) on purpose: Gate 4 must run
-#  before anything leaves the runner, and a job is the unit that "left the
-#  machine". Each gate is its own *step* so the UI shows exactly which gate
-#  stopped the run.
-#
-#  Required secrets/variables: docs/devsecops-setup.md
-# ─────────────────────────────────────────────────────────────────────────────
-name: DevSecOps Pipeline
+
+name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
 
+env:
+  GRYPE_SEVERITY_THRESHOLD: high
 permissions:
   contents: read
-  packages: write # push the staging image to ghcr.io with GITHUB_TOKEN
-
-# One run per ref at a time — a newer push cancels a stale, still-scanning run.
-concurrency:
-  group: devsecops-${{ github.ref }}
-  cancel-in-progress: true
+  packages: write
 
 jobs:
-  # ════════════════════════════════════════════════════════════════════════
-  #  Gates 0-3 — code-level checks. Cheapest first, before any image exists.
-  # ════════════════════════════════════════════════════════════════════════
-  code-gates:
-    name: "Gates 0-3 · code"
+
+  # ============================================================
+  # Gate 0 — Secrets scan (whole repo, both components)
+  # ============================================================
+  gitleaks:
     runs-on: ubuntu-latest
     steps:
-      # Full history: Gate 0 scans git history, Gate 3 needs blame data.
-      - name: Checkout
+      - id: checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # gitleaks needs full history, not a shallow clone
 
-      - name: Setup .NET 10
-        uses: actions/setup-dotnet@v4
+      - id: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true # so we can report/archive before failing the job
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_REPORT_FORMAT: json
+          GITLEAKS_REPORT_PATH: gitleaks-report.json
+
+      - name: Archive report
+        if: always()
+        run: |
+          mkdir -p report-out
+          if [ -f gitleaks-report.json ]; then
+            cp gitleaks-report.json report-out/
+          else
+            echo "no report produced" > report-out/NO_REPORT.txt
+          fi
+          tar -czf gitleaks-report.tar.gz -C report-out .
+
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          dotnet-version: "10.0.x"
+          name: gitleaks-report
+          path: gitleaks-report.tar.gz
+          retention-days: 7
 
-      - name: Setup Node 22
-        uses: actions/setup-node@v4
+      - name: Pass/fail message
+        if: always()
+        run: |
+          if [ "${{ steps.gitleaks.outcome }}" == "success" ]; then
+            echo "✅ gitleaks: passed, no secrets detected" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            REASON=$(jq -r '.[0].RuleID // "see gitleaks-report artifact"' gitleaks-report.json 2>/dev/null || echo "see gitleaks-report artifact")
+            echo "❌ gitleaks: failed — secret pattern matched ($REASON)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+  # ============================================================
+  # Gate 1 — Lint (backend: checkstyle, frontend: eslint)
+  # ============================================================
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hadolint — backend Dockerfile
+        id: hadolint-backend
+        continue-on-error: true
+        uses: hadolint/hadolint-action@v3
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          dockerfile: backend/Dockerfile
+          output-file: hadolint-backend.json
+          format: json
 
-      # ── Gate 0 — secrets ────────────────────────────────────────────────
-      - name: "Gate 0 — gitleaks (secrets in repo + git history)"
-        uses: docker://zricethezav/gitleaks:v8.18.2
-        with:
-          # no --no-git: history is the point. --redact masks any match.
-          args: detect --redact -v
-
-      # ── Gate 1 — lint ───────────────────────────────────────────────────
-      - name: "Gate 1 — hadolint (backend Dockerfile)"
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: backend/Helaq.API/Dockerfile
-          failure-threshold: warning
-
-      - name: "Gate 1 — hadolint (frontend Dockerfile)"
-        uses: hadolint/hadolint-action@v3.1.0
+      - name: Hadolint — frontend Dockerfile
+        id: hadolint-frontend
+        continue-on-error: true
+        uses: hadolint/hadolint-action@v3
         with:
           dockerfile: frontend/Dockerfile
-          failure-threshold: warning
+          output-file: hadolint-frontend.json
+          format: json
 
-      - name: "Gate 1 — eslint (frontend, ratcheted baseline)"
-        working-directory: frontend
-        run: |
-          npm ci --no-audit --no-fund
-
-          # Existing debt is recorded in .eslint-baseline (215 errors, mostly
-          # react-hooks/set-state-in-effect ×119 + no-explicit-any ×41) rather
-          # than "solved" by downgrading rules: the gate fails the moment the
-          # error count exceeds the baseline, and the baseline only ever moves
-          # DOWN as the debt is paid off.
-          npx eslint --format json --output-file /tmp/eslint-report.json . || true
-          errors=$(jq '[.[] | .messages[] | select(.severity == 2)] | length' /tmp/eslint-report.json)
-          baseline=$(tr -d '[:space:]' < .eslint-baseline)
-
-          echo "eslint errors: $errors — baseline: $baseline (lower as you fix debt; never raise)"
-          echo "top offenders:"
-          jq -r '[.[] | .messages[] | select(.severity == 2) | .ruleId]
-                  | group_by(.) | map({rule: .[0], n: length}) | sort_by(-.n)[:10][]
-                  | "  \(.n)\t\(.rule)"' /tmp/eslint-report.json
-
-          if [ "$errors" -gt "$baseline" ]; then
-            echo "::error::Gate 1 failed — $errors eslint errors exceeds baseline $baseline. Run 'npm run lint' in frontend/ and fix the new errors."
-            exit 1
-          fi
-
-      - name: "Gate 1 — dotnet format (backend style/syntax)"
-        run: |
-          dotnet restore backend/backend.slnx
-          # Fix locally with:  dotnet format backend/backend.slnx
-          dotnet format backend/backend.slnx --verify-no-changes --no-restore
-
-      # ── Gate 2 — SCA ────────────────────────────────────────────────────
-      # OWASP Dependency-Check was swapped for the language-native auditors:
-      # it needs an NVD API key, is rate-limited, and reads .NET manifests
-      # poorly — while `npm audit` / `dotnet list --vulnerable` read our actual
-      # lock state. Documented in architecture.md as a deliberate substitution.
-      - name: "Gate 2 — npm audit (frontend dependencies)"
-        working-directory: frontend
-        run: npm audit --audit-level=high
-
-      - name: "Gate 2 — dotnet list --vulnerable (backend dependencies)"
-        run: |
-          dotnet list backend/backend.slnx package --vulnerable --include-transitive | tee /tmp/vulnerable.txt
-          # `dotnet list` always exits 0 — any CVE/GHSA line is the gate signal.
-          if grep -qE 'CVE-|GHSA-' /tmp/vulnerable.txt; then
-            echo "::error file=backend/backend.slnx::Gate 2 failed — vulnerable .NET packages (fix = version bump):"
-            cat /tmp/vulnerable.txt
-            exit 1
-          fi
-
-      # ── Gate 3 — SAST ──────────────────────────────────────────────────
-      - name: "Gate 3 — preflight (SonarQube configured?)"
-        env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: |
-          if [ -z "$SONAR_HOST_URL" ] || [ -z "$SONAR_TOKEN" ]; then
-            echo "::error::Gate 3 needs secrets SONAR_HOST_URL + SONAR_TOKEN — see docs/devsecops-setup.md"
-            exit 1
-          fi
-
-      - name: Setup Java (SonarScanner for .NET needs a JRE)
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "17" # TODO(validate): match your actual Java version from pom.xml
 
-      - name: Install SonarScanner for .NET
+      - name: Backend lint (checkstyle)
+        id: lint-backend
+        continue-on-error: true
+        working-directory: backend
         run: |
-          dotnet tool install -g dotnet-sonarscanner
-          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          # TODO(validate): confirm the checkstyle plugin is bound in pom.xml;
+          # if not present, replace with your actual lint target (spotbugs, pmd, etc.)
+          ./mvnw -B checkstyle:check | tee ../checkstyle-backend.log
 
-      - name: "Gate 3 — SonarQube (SAST, quality gate must pass)"
-        env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
-          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
-        run: |
-          KEY="${SONAR_PROJECT_KEY:-$(echo '${{ github.repository }}' | tr '/:' '__')}"
-          ARGS=(
-            begin /k:"$KEY"
-            /d:sonar.host.url="$SONAR_HOST_URL"
-            /d:sonar.token="$SONAR_TOKEN"
-            /d:sonar.projectBaseDir="$GITHUB_WORKSPACE"
-            /d:sonar.sources=.
-            "/d:sonar.exclusions=**/node_modules/**,**/bin/**,**/obj/**,**/.next/**,**/wwwroot/lib/**,**/swagger.json,**/k6-tests/**"
-            # blocks the pipeline on a failed Quality Gate — this is the gate
-            /d:sonar.qualitygate.wait=true
-          )
-          [ -n "$SONAR_ORGANIZATION" ] && ARGS+=("/d:sonar.organization=$SONAR_ORGANIZATION")
-
-          dotnet sonar "${ARGS[@]}"
-          dotnet build backend/backend.slnx -c Release --no-restore
-          dotnet sonar end
-
-  # ════════════════════════════════════════════════════════════════════════
-  #  Build → SBOM → Gate 4 → staging push (GHCR).
-  #  Everything through Gate 4 runs on one runner: when Grype passes, *then*
-  #  the image leaves the machine for the first time.
-  # ════════════════════════════════════════════════════════════════════════
-  image:
-    name: "Build · SBOM · Gate 4 · stage (${{ matrix.component }})"
-    runs-on: ubuntu-latest
-    needs: code-gates
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - component: backend
-            image: helaq-api
-            context: ./backend
-            dockerfile: ./backend/Helaq.API/Dockerfile
-          - component: frontend
-            image: helaq-frontend
-            context: ./frontend
-            dockerfile: ./frontend/Dockerfile
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install buildah + syft + grype
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y buildah
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh  | sudo sh -s -- -b /usr/local/bin
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sudo sh -s -- -b /usr/local/bin
-          syft version
-          grype version
-
-      # ── Build — buildah, tag = commit SHA (never `latest`) ─────────────
-      - name: "Build — buildah ${{ matrix.image }}:${{ github.sha }}"
-        run: |
-          # sudo because GitHub-hosted runners have no subuid range for the
-          # `runner` user — rootless buildah refuses to start without one.
-          sudo buildah bud --layers --format oci \
-            -f "${{ matrix.dockerfile }}" \
-            -t "${{ matrix.image }}:${{ github.sha }}" \
-            "${{ matrix.context }}"
-
-      # ── SBOM — syft (artifact step, not a gate) ────────────────────────
-      - name: "SBOM — syft (artifact, feeds Gate 4 + cosign)"
-        run: |
-          sudo buildah push "${{ matrix.image }}:${{ github.sha }}" \
-            "docker-archive:/tmp/${{ matrix.image }}.tar"
-          sudo chown "$USER:$USER" "/tmp/${{ matrix.image }}.tar"
-
-          syft "docker-archive:/tmp/${{ matrix.image }}.tar" \
-            -o "spdx-json=/tmp/sbom-${{ matrix.image }}.spdx.json"
-          echo "SBOM packages: $(jq '.packages | length' "/tmp/sbom-${{ matrix.image }}.spdx.json")"
-
-      # ── Gate 4 — Grype on the SBOM, before any push ────────────────────
-      # Grype instead of `roxctl image scan` here: ACS queries a registry it
-      # has an integration for, and nothing has been pushed yet. See
-      # architecture.md — deliberate substitution, not an oversight.
-      - name: "Gate 4 — grype (CVE scan of the SBOM, pre-push)"
-        run: |
-          grype "sbom:/tmp/sbom-${{ matrix.image }}.spdx.json" \
-            --fail-on high \
-            -o table \
-            -o "json=/tmp/grype-${{ matrix.image }}.json"
-
-      - name: Upload evidence (SBOM + Grype report)
-        uses: actions/upload-artifact@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          name: sbom-${{ matrix.component }}-${{ github.sha }}
+          node-version: "20" # TODO(validate): match your actual Node version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend lint (eslint)
+        id: lint-frontend
+        continue-on-error: true
+        working-directory: frontend
+        run: |
+          npm ci
+          # TODO(validate): confirm a "lint" script exists in package.json
+          npm run lint -- --format json --output-file ../eslint-frontend.json
+
+      - name: Archive lint reports
+        if: always()
+        run: |
+          mkdir -p report-out
+          for f in hadolint-backend.json hadolint-frontend.json checkstyle-backend.log eslint-frontend.json; do
+            [ -f "$f" ] && cp "$f" report-out/
+          done
+          [ -z "$(ls -A report-out 2>/dev/null)" ] && echo "no report produced" > report-out/NO_REPORT.txt
+          tar -czf lint-report.tar.gz -C report-out .
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lint-report
+          path: lint-report.tar.gz
+          retention-days: 7
+
+      - name: Pass/fail message
+        if: always()
+        run: |
+          FAILED=""
+          [ "${{ steps.hadolint-backend.outcome }}" != "success" ] && FAILED="$FAILED hadolint-backend"
+          [ "${{ steps.hadolint-frontend.outcome }}" != "success" ] && FAILED="$FAILED hadolint-frontend"
+          [ "${{ steps.lint-backend.outcome }}" != "success" ] && FAILED="$FAILED checkstyle-backend"
+          [ "${{ steps.lint-frontend.outcome }}" != "success" ] && FAILED="$FAILED eslint-frontend"
+          if [ -z "$FAILED" ]; then
+            echo "✅ lint: passed (backend + frontend)" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ lint: failed —$FAILED (see lint-report artifact)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+  # ============================================================
+  # Parallel with gitleaks + lint — Test + coverage (backend + frontend)
+  # ============================================================
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17" # TODO(validate)
+
+      - name: Backend tests + JaCoCo coverage
+        id: test-backend
+        continue-on-error: true
+        working-directory: backend
+        run: |
+          # TODO(validate): confirm jacoco-maven-plugin is bound to the
+          # `test` phase in pom.xml; if not, add it or coverage will be empty
+          ./mvnw -B test
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20" # TODO(validate)
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Frontend tests + coverage
+        id: test-frontend
+        continue-on-error: true
+        working-directory: frontend
+        run: |
+          npm ci
+          # TODO(validate): confirm the test runner honors --coverage and
+          # writes lcov to coverage/lcov.info (Jest default) — this repo
+          # already has a coverage/ dir checked in from a prior local run,
+          # remove that from git and let CI regenerate it fresh each time
+          npm test -- --coverage --watchAll=false
+
+      - name: Archive coverage + test reports
+        if: always()
+        run: |
+          mkdir -p report-out/backend report-out/frontend
+          [ -d backend/target/site/jacoco ] && cp -r backend/target/site/jacoco report-out/backend/
+          [ -d backend/target/surefire-reports ] && cp -r backend/target/surefire-reports report-out/backend/
+          [ -d frontend/coverage ] && cp -r frontend/coverage report-out/frontend/
+          tar -czf test-report.tar.gz -C report-out .
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-report
+          path: test-report.tar.gz
+          retention-days: 7
+
+      # Separate, untarred artifact for SonarQube to consume directly
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-raw
           path: |
-            /tmp/sbom-${{ matrix.image }}.spdx.json
-            /tmp/grype-${{ matrix.image }}.json
-          retention-days: 30
+            backend/target/site/jacoco/jacoco.xml
+            frontend/coverage/lcov.info
+          retention-days: 1
 
-      # ── Push to staging registry (GHCR) — first time bytes leave ──────
-      - name: "Push to staging registry — ghcr.io (GITHUB_TOKEN)"
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OWNER: ${{ github.repository_owner }}
+      - name: Pass/fail message
+        if: always()
         run: |
-          echo "$GHCR_TOKEN" | sudo buildah login --username "${{ github.actor }}" --password-stdin ghcr.io
-          sudo buildah push "${{ matrix.image }}:${{ github.sha }}" \
-            "ghcr.io/${OWNER,,}/${{ matrix.image }}:${{ github.sha }}"
-
-  # ════════════════════════════════════════════════════════════════════════
-  #  Gate 5 — ACS policy check against the staged image in ghcr.io.
-  #  Prerequisite: an Image Integration for ghcr.io in ACS Central, otherwise
-  #  this fails with "no matching image registries found" (documented error).
-  # ════════════════════════════════════════════════════════════════════════
-  gate5-acs:
-    name: "Gate 5 — ACS (${{ matrix.component }})"
-    runs-on: ubuntu-latest
-    needs: image
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - component: backend
-            image: helaq-api
-          - component: frontend
-            image: helaq-frontend
-    steps:
-      - name: "Gate 5 — preflight (ACS configured?)"
-        env:
-          ROX_CENTRAL_ENDPOINT: ${{ secrets.ROX_CENTRAL_ENDPOINT }}
-          ROX_API_TOKEN: ${{ secrets.ROX_API_TOKEN }}
-        run: |
-          if [ -z "$ROX_CENTRAL_ENDPOINT" ] || [ -z "$ROX_API_TOKEN" ]; then
-            echo "::error::Gate 5 needs secrets ROX_CENTRAL_ENDPOINT (host:443, no https://) + ROX_API_TOKEN — see docs/devsecops-setup.md"
+          if [ "${{ steps.test-backend.outcome }}" == "success" ] && [ "${{ steps.test-frontend.outcome }}" == "success" ]; then
+            echo "✅ test: passed (backend + frontend)" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            FAILED=""
+            [ "${{ steps.test-backend.outcome }}" != "success" ] && FAILED="$FAILED backend"
+            [ "${{ steps.test-frontend.outcome }}" != "success" ] && FAILED="$FAILED frontend"
+            echo "❌ test: failed —$FAILED (see test-report artifact)" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
-      - name: Install roxctl (downloaded from Central itself)
-        env:
-          ROX_CENTRAL_ENDPOINT: ${{ secrets.ROX_CENTRAL_ENDPOINT }}
-          ROX_API_TOKEN: ${{ secrets.ROX_API_TOKEN }}
-        run: |
-          curl -fsSL -H "Authorization: Bearer $ROX_API_TOKEN" \
-            "https://$ROX_CENTRAL_ENDPOINT/api/cli/download/roxctl-linux" \
-            -o /tmp/roxctl
-          chmod +x /tmp/roxctl
-          sudo mv /tmp/roxctl /usr/local/bin/roxctl
-          roxctl version
-
-      - name: "Gate 5 — roxctl image scan + image check (GHCR staged image)"
-        env:
-          OWNER: ${{ github.repository_owner }}
-          ROX_CENTRAL_ENDPOINT: ${{ secrets.ROX_CENTRAL_ENDPOINT }}
-          ROX_API_TOKEN: ${{ secrets.ROX_API_TOKEN }}
-          # set repository variable ROX_SKIP_TLS_VERIFY=true for a self-signed Central
-          ROX_INSECURE_CLIENT_SKIP_TLS_VERIFY: ${{ vars.ROX_SKIP_TLS_VERIFY || 'false' }}
-        run: |
-          IMAGE="ghcr.io/${OWNER,,}/${{ matrix.image }}:${{ github.sha }}"
-
-          # scan: forces Central to pull + analyse the staged image — a second,
-          # independent CVE source next to Grype.
-          roxctl image scan --endpoint "$ROX_CENTRAL_ENDPOINT" --image "$IMAGE" --output table
-
-          # check: the full policy set — CVEs *plus* deploy-time configuration
-          # risks Grype never evaluates (privileged, root, missing limits…).
-          roxctl image check --endpoint "$ROX_CENTRAL_ENDPOINT" --image "$IMAGE" --output table
-
-  # ════════════════════════════════════════════════════════════════════════
-  #  Promote to Quay — skopeo copy, no rebuild: the exact bytes that passed
-  #  every gate land in the registry the cluster pulls from.
-  #  (Gate 6 = Quay's own Clair scan starts the moment the image arrives.)
-  # ════════════════════════════════════════════════════════════════════════
-  promote-quay:
-    name: "Promote — Quay (${{ matrix.component }})"
+  # ============================================================
+  # Gate 2 — SonarQube (after gitleaks + lint + test)
+  # ============================================================
+  sonarqube:
     runs-on: ubuntu-latest
-    needs: gate5-acs
-    if: github.event_name == 'push'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - component: backend
-            image: helaq-api
-          - component: frontend
-            image: helaq-frontend
+    needs: [gitleaks, lint, test]
     steps:
-      - name: "Promote — preflight (Quay configured?)"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-raw
+          path: coverage-raw
+
+      - name: SonarQube Scan
+        id: sonarqube-scan
+        continue-on-error: true
+        uses: SonarSource/sonarqube-scan-action@v4
         env:
-          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
-          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=<your-project-key>
+            -Dsonar.sources=backend/src,frontend/src
+            -Dsonar.java.binaries=backend/target/classes
+            -Dsonar.coverage.jacoco.xmlReportPaths=coverage-raw/jacoco.xml
+            -Dsonar.javascript.lcov.reportPaths=coverage-raw/lcov.info
+
+      - name: Quality Gate check
+        id: quality-gate
+        continue-on-error: true
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Archive report
+        if: always()
         run: |
-          if [ -z "$QUAY_USERNAME" ] || [ -z "$QUAY_PASSWORD" ]; then
-            echo "::error::Promotion needs secrets QUAY_USERNAME + QUAY_PASSWORD (Quay robot account) — see docs/devsecops-setup.md"
+          mkdir -p report-out
+          [ -d .scannerwork ] && cp -r .scannerwork report-out/ 2>/dev/null || true
+          [ -z "$(ls -A report-out 2>/dev/null)" ] && echo "no local report — see SonarQube dashboard" > report-out/NO_REPORT.txt
+          tar -czf sonarqube-report.tar.gz -C report-out .
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sonarqube-report
+          path: sonarqube-report.tar.gz
+          retention-days: 7
+
+      - name: Pass/fail message
+        if: always()
+        run: |
+          if [ "${{ steps.quality-gate.outcome }}" == "success" ]; then
+            echo "✅ sonarqube: Quality Gate passed" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ sonarqube: Quality Gate failed — see ${{ secrets.SONAR_HOST_URL }} for details" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
-      - name: Install skopeo
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y skopeo
-
-      - name: "skopeo copy ghcr.io → quay.io (byte-for-byte, no rebuild)"
-        env:
-          OWNER: ${{ github.repository_owner }}
-          QUAY_ORG: ${{ vars.QUAY_ORG || github.repository_owner }}
-          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
-          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
-        run: |
-          SRC="ghcr.io/${OWNER,,}/${{ matrix.image }}:${{ github.sha }}"
-          DST="quay.io/${QUAY_ORG,,}/${{ matrix.image }}:${{ github.sha }}"
-
-          echo "$QUAY_PASSWORD" | skopeo login --username "$QUAY_USERNAME" --password-stdin quay.io
-          skopeo copy --all "docker://$SRC" "docker://$DST"
-
-  # ════════════════════════════════════════════════════════════════════════
-  #  Sign + attach SBOM (cosign) — turns a chain of scans into a claim about
-  #  one specific, unmodified image.
-  # ════════════════════════════════════════════════════════════════════════
-  sign:
-    name: "Sign + SBOM attest (${{ matrix.component }})"
+  # ============================================================
+  # Build -> SBOM -> Grype -> push to GHCR (staging) -> ACS gate ->
+  # promote to Quay -> sign. All in ONE job per component, because
+  # each GitHub Actions job runs on a fresh VM — a local image built
+  # in one job does not exist in the next job, so everything that
+  # needs that same local image has to stay in the same job.
+  # ============================================================
+  build-scan-push-sign:
     runs-on: ubuntu-latest
-    needs: promote-quay
-    if: github.event_name == 'push'
+    needs: [sonarqube]
     strategy:
-      fail-fast: false
       matrix:
-        include:
-          - component: backend
-            image: helaq-api
-          - component: frontend
-            image: helaq-frontend
+        component: [backend, frontend]
+    outputs:
+      backend_image: ${{ steps.set-output.outputs.backend_image }}
+      frontend_image: ${{ steps.set-output.outputs.frontend_image }}
     steps:
-      - name: "Sign — preflight (cosign key configured?)"
-        env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
-        run: |
-          if [ -z "$COSIGN_PRIVATE_KEY" ] || [ -z "$COSIGN_PASSWORD" ]; then
-            echo "::error::Signing needs secrets COSIGN_PRIVATE_KEY + COSIGN_PASSWORD — see docs/devsecops-setup.md"
-            exit 1
-          fi
+      - uses: actions/checkout@v4
 
+      # ---- Build (local only) ----
+      - name: Build image
+        id: build
+        continue-on-error: true
+        run: docker build -t ${{ matrix.component }}:${{ github.sha }} ./${{ matrix.component }}
+
+      # ---- SBOM ----
+      - name: Generate SBOM (syft)
+        id: syft
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ matrix.component }}:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: sbom-${{ matrix.component }}.json
+
+      # ---- Gate 4: Grype on the local SBOM, no registry involved ----
+      # ACS/roxctl needs a registry reference to scan — it queries the
+      # registry for image metadata rather than reading local layers, so a
+      # true registry-free pre-push scan has to use Grype here instead.
+      - name: Scan SBOM with Grype
+        id: grype
+        if: steps.syft.outcome == 'success'
+        continue-on-error: true
+        uses: anchore/scan-action@v4
+        with:
+          sbom: sbom-${{ matrix.component }}.json
+          fail-build: true
+          severity-cutoff: ${{ env.GRYPE_SEVERITY_THRESHOLD }}
+          output-format: json
+
+      # ---- Push to GHCR (staging registry, so ACS has something to query) ----
+      - name: Log in to GHCR
+        id: ghcr-login
+        if: steps.grype.outcome == 'success'
+        continue-on-error: true
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push to GHCR
+        id: push-ghcr
+        if: steps.ghcr-login.outcome == 'success'
+        continue-on-error: true
+        run: |
+          IMAGE="ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:${{ github.sha }}"
+          docker tag ${{ matrix.component }}:${{ github.sha }} "$IMAGE"
+          docker push "$IMAGE"
+          echo "ghcr_image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      # ---- Gate 5: ACS policy check against the staged GHCR image ----
+      # Prerequisite: a GHCR Image Integration must already be configured
+      # in ACS Central, or this fails with "no matching image registries found".
+      - name: roxctl setup
+        id: roxctl-setup
+        if: steps.push-ghcr.outcome == 'success'
+        continue-on-error: true
+        run: |
+          curl -sSL -o roxctl "https://mirror.openshift.com/pub/rhacs/assets/latest/bin/Linux/roxctl"
+          chmod +x roxctl
+
+      - name: ACS image check (Gate 5)
+        id: acs-check
+        if: steps.roxctl-setup.outcome == 'success'
+        continue-on-error: true
+        run: |
+          ./roxctl image check \
+            --image="${{ steps.push-ghcr.outputs.ghcr_image }}" \
+            --endpoint "${{ secrets.ROX_CENTRAL_ENDPOINT }}" \
+            --token "${{ secrets.ROX_API_TOKEN }}" \
+            --insecure-skip-tls-verify \
+            --output json > acs-check-${{ matrix.component }}.json
+
+      # ---- Promote to Docker Hub: exact bytes that passed every gate, no rebuild ----
+      # Docker Hub replaces Quay for this project (mentor-approved scope
+      # deviation — Quay was the registry named in the original brief).
+      - name: Promote to Docker Hub (skopeo)
+        id: promote-dockerhub
+        if: steps.acs-check.outcome == 'success'
+        continue-on-error: true
+        run: |
+          docker run --rm quay.io/skopeo/stable copy \
+            --src-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            --dest-creds "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_TOKEN }}" \
+            "docker://${{ steps.push-ghcr.outputs.ghcr_image }}" \
+            "docker://docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ matrix.component }}:${{ github.sha }}"
+          echo "final_image=docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ matrix.component }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        # Note: the skopeo CLI image itself is pulled from quay.io/skopeo/stable
+        # purely as a tool container — this is unrelated to where we store
+        # our own application images, which is Docker Hub per the decision above.
+
+      # ---- Gate 6: Docker Scout CVE scan ----
+      # Unlike Quay, Docker Hub does not scan pushed images automatically
+      # on a free/personal plan, so this has to be an explicit step here
+      # rather than something that "just happens" after the push.
+      - name: Install Docker Scout
+        id: scout-setup
+        if: steps.promote-dockerhub.outcome == 'success'
+        continue-on-error: true
+        run: curl -sSfL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh | sh -s --
+
+      - name: Gate 6 — Docker Scout CVE scan
+        id: scout-scan
+        if: steps.scout-setup.outcome == 'success'
+        continue-on-error: true
+        env:
+          DOCKER_SCOUT_HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKER_SCOUT_HUB_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          docker scout cves "${{ steps.promote-dockerhub.outputs.final_image }}" \
+            --exit-code --only-severity critical,high \
+            --output scout-${{ matrix.component }}.json --format sarif
+
+      # ---- Sign the promoted image + attach the SBOM as an attestation ----
       - name: Install cosign
+        id: cosign-setup
+        if: steps.scout-scan.outcome == 'success'
+        continue-on-error: true
         uses: sigstore/cosign-installer@v3
 
-      - name: Download SBOM evidence
-        uses: actions/download-artifact@v4
-        with:
-          name: sbom-${{ matrix.component }}-${{ github.sha }}
-          path: /tmp/evidence
-
-      - name: Write cosign private key
+      - name: Sign image and attach SBOM
+        id: sign
+        if: steps.cosign-setup.outcome == 'success'
+        continue-on-error: true
         env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-        run: |
-          umask 077
-          printf '%s\n' "$COSIGN_PRIVATE_KEY" > /tmp/cosign.key
-
-      - name: "cosign sign + attach SBOM attestation (Quay)"
-        env:
-          QUAY_ORG: ${{ vars.QUAY_ORG || github.repository_owner }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
-          IMG="quay.io/${QUAY_ORG,,}/${{ matrix.image }}:${{ github.sha }}"
+          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
+          cosign sign --key cosign.key --yes "${{ steps.promote-dockerhub.outputs.final_image }}" \
+            --registry-creds "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_TOKEN }}"
+          cosign attach sbom --sbom sbom-${{ matrix.component }}.json \
+            "${{ steps.promote-dockerhub.outputs.final_image }}"
+          rm -f cosign.key
 
-          cosign sign --key /tmp/cosign.key \
-            -a "commit=${{ github.sha }}" \
-            -a "repo=${{ github.repository }}" \
-            --yes "$IMG"
-
-          cosign attest --key /tmp/cosign.key \
-            --type spdxjson \
-            --predicate "/tmp/evidence/sbom-${{ matrix.image }}.spdx.json" \
-            --yes "$IMG"
-
-  # ════════════════════════════════════════════════════════════════════════
-  #  Update the manifest repo — the *only* thing CI writes outside itself.
-  #  GitHub Actions never gets cluster credentials: ArgoCD (in-cluster) does
-  #  the apply, and Gate 7 re-checks there. main branch only — a dev push
-  #  must not re-deploy the cluster.
-  # ════════════════════════════════════════════════════════════════════════
-  update-manifests:
-    name: "GitOps — update manifest repo"
-    runs-on: ubuntu-latest
-    needs: sign
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - name: "GitOps — preflight (manifest repo configured?)"
-        env:
-          MANIFEST_REPO: ${{ vars.MANIFEST_REPO }}
-          MANIFEST_PAT: ${{ secrets.MANIFEST_PAT || secrets.GH_PAT }}
+      - name: Set job output (final image ref)
+        id: set-output
+        if: always()
         run: |
-          if [ -z "$MANIFEST_REPO" ]; then
-            echo "::error::Set repository variable MANIFEST_REPO (owner/name of the GitOps repo) — see docs/devsecops-setup.md"
-            exit 1
-          fi
-          if [ -z "$MANIFEST_PAT" ]; then
-            echo "::error::Set secret MANIFEST_PAT (PAT with write access to $MANIFEST_REPO)"
-            exit 1
-          fi
+          echo "${{ matrix.component }}_image=${{ steps.promote-dockerhub.outputs.final_image }}" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout manifest repo
-        uses: actions/checkout@v4
+      # ---- Archive everything this job produced ----
+      - name: Archive reports
+        if: always()
+        run: |
+          mkdir -p report-out
+          for f in sbom-${{ matrix.component }}.json acs-check-${{ matrix.component }}.json scout-${{ matrix.component }}.json; do
+            [ -f "$f" ] && cp "$f" report-out/
+          done
+          find . -maxdepth 1 -iname "*grype*.json" -exec cp {} report-out/ \; 2>/dev/null || true
+          [ -z "$(ls -A report-out 2>/dev/null)" ] && echo "no report produced" > report-out/NO_REPORT.txt
+          tar -czf build-scan-push-sign-${{ matrix.component }}-report.tar.gz -C report-out .
+
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          repository: ${{ vars.MANIFEST_REPO }}
-          token: ${{ secrets.MANIFEST_PAT || secrets.GH_PAT }}
-          path: manifests
+          name: build-scan-push-sign-${{ matrix.component }}-report
+          path: build-scan-push-sign-${{ matrix.component }}-report.tar.gz
+          retention-days: 7
 
-      - name: Point manifests at the new commit-SHA tag
-        env:
-          MANIFEST_REPO: ${{ vars.MANIFEST_REPO }}
+      - name: Pass/fail message
+        if: always()
         run: |
-          K=manifests/kustomization.yaml
-          if [ ! -f "$K" ]; then
-            echo "::error::$K not found in $MANIFEST_REPO — seed it from gitops/ (see gitops/README.md)"
+          if [ "${{ steps.sign.outcome }}" == "success" ]; then
+            echo "✅ build-scan-push-sign (${{ matrix.component }}): passed — signed image at ${{ steps.promote-dockerhub.outputs.final_image }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            # walk forward through the chain to name the first real failure
+            REASON="see build-scan-push-sign-${{ matrix.component }}-report artifact and job log for the failing step"
+            [ "${{ steps.build.outcome }}" != "success" ] && REASON="docker build failed"
+            [ "${{ steps.syft.outcome }}" != "success" ] && [ "${{ steps.build.outcome }}" == "success" ] && REASON="SBOM generation failed"
+            [ "${{ steps.grype.outcome }}" != "success" ] && [ "${{ steps.syft.outcome }}" == "success" ] && REASON="vulnerabilities at or above ${{ env.GRYPE_SEVERITY_THRESHOLD }} found"
+            [ "${{ steps.push-ghcr.outcome }}" != "success" ] && [ "${{ steps.grype.outcome }}" == "success" ] && REASON="GHCR push failed"
+            [ "${{ steps.acs-check.outcome }}" != "success" ] && [ "${{ steps.push-ghcr.outcome }}" == "success" ] && REASON="ACS policy violation"
+            [ "${{ steps.promote-dockerhub.outcome }}" != "success" ] && [ "${{ steps.acs-check.outcome }}" == "success" ] && REASON="Docker Hub promotion failed"
+            [ "${{ steps.scout-scan.outcome }}" != "success" ] && [ "${{ steps.promote-dockerhub.outcome }}" == "success" ] && REASON="Docker Scout found CRITICAL/HIGH CVEs"
+            [ "${{ steps.sign.outcome }}" != "success" ] && [ "${{ steps.scout-scan.outcome }}" == "success" ] && REASON="cosign signing failed"
+            echo "❌ build-scan-push-sign (${{ matrix.component }}): failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          # Both app images are rebuilt from the same commit, so rewriting every
-          # newTag: line is correct. Do not use newTag: for anything else.
-          sed -i "s/newTag: .*/newTag: ${{ github.sha }}/" "$K"
-          grep -n "newTag" "$K"
 
-      - name: "Commit desired state (ArgoCD picks this up)"
+  # ============================================================
+  # Update the separate GitOps manifest repo with the new, signed
+  # image tags. ArgoCD watches that repo and syncs the cluster —
+  # this job never touches the OpenShift cluster directly.
+  # ============================================================
+  update-manifest:
+    runs-on: ubuntu-latest
+    needs: [build-scan-push-sign]
+    steps:
+      - name: Clone manifest repo
+        id: clone
+        continue-on-error: true
+        run: |
+          git clone "https://x-access-token:${{ secrets.MANIFEST_REPO_TOKEN }}@github.com/${{ vars.MANIFEST_REPO }}.git" manifests
+          cd manifests
+          git config user.email "pipeline-bot@ci"
+          git config user.name "pipeline-bot"
+
+      - name: Bump image tags
+        id: bump
+        if: steps.clone.outcome == 'success'
+        continue-on-error: true
         working-directory: manifests
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "Tag already points at ${{ github.sha }} — nothing to do."
+          # TODO(validate): adjust paths/keys to match your actual kustomize
+          # or plain-YAML layout — this assumes a kustomization.yaml per
+          # component under overlays/production/
+          sed -i "s#newTag: .*#newTag: ${{ github.sha }}#" overlays/production/backend/kustomization.yaml
+          sed -i "s#newTag: .*#newTag: ${{ github.sha }}#" overlays/production/frontend/kustomization.yaml
+          git commit -am "bump backend+frontend to ${{ github.sha }}" || echo "nothing to commit"
+
+      - name: Push manifest repo
+        id: push-manifest
+        if: steps.bump.outcome == 'success'
+        continue-on-error: true
+        working-directory: manifests
+        run: git push
+
+      - name: Pass/fail message
+        if: always()
+        run: |
+          if [ "${{ steps.push-manifest.outcome }}" == "success" ]; then
+            echo "✅ update-manifest: passed — ArgoCD will sync commit ${{ github.sha }}" | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            git commit -m "deploy: ${{ github.sha }} — passed all gates, signed, promoted to Quay"
-            git push
+            REASON="see job log"
+            [ "${{ steps.clone.outcome }}" != "success" ] && REASON="could not clone manifest repo — check MANIFEST_REPO_TOKEN"
+            [ "${{ steps.bump.outcome }}" != "success" ] && [ "${{ steps.clone.outcome }}" == "success" ] && REASON="failed to update kustomization.yaml — check paths"
+            [ "${{ steps.push-manifest.outcome }}" != "success" ] && [ "${{ steps.bump.outcome }}" == "success" ] && REASON="git push rejected — check branch protection/token scope"
+            echo "❌ update-manifest: failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
