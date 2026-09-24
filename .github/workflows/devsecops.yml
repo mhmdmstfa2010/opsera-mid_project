@@ -602,12 +602,32 @@ jobs:
   update-manifest:
     runs-on: ubuntu-latest
     needs: [build-scan-push-sign]
+    env:
+      # Accept the repo slug from either a repository Variable or a Secret.
+      # They are easy to confuse (Settings -> Secrets and variables -> Actions
+      # has two separate tabs), and a slug stored in the wrong one silently
+      # expands to an empty string, which produced the unhelpful
+      # "repository 'https://github.com/.git/' not found" below.
+      MANIFEST_REPO: ${{ vars.MANIFEST_REPO || secrets.MANIFEST_REPO }}
     steps:
-      - name: Clone manifest repo
-        id: clone
+      - name: Resolve manifest repo slug
+        id: cfg
         continue-on-error: true
         run: |
-          git clone "https://x-access-token:${{ secrets.MANIFEST_REPO_TOKEN }}@github.com/${{ vars.MANIFEST_REPO }}.git" manifests
+          SLUG="$(printf '%s' "$MANIFEST_REPO" | tr -d '[:space:]')"
+          if [ -z "$SLUG" ]; then
+            echo "::error::MANIFEST_REPO is empty. Set it under Settings -> Secrets and variables -> Actions, as EITHER a Variable OR a Secret, to owner/repo (currently expected: mhmdmstfa2010/opsera-mid_project_cd)."
+            exit 1
+          fi
+          echo "MANIFEST_REPO=$SLUG" >> "$GITHUB_ENV"
+          echo "using manifest repo: $SLUG"
+
+      - name: Clone manifest repo
+        id: clone
+        if: steps.cfg.outcome == 'success'
+        continue-on-error: true
+        run: |
+          git clone "https://x-access-token:${{ secrets.MANIFEST_REPO_TOKEN }}@github.com/${{ env.MANIFEST_REPO }}.git" manifests
           cd manifests
           git config user.email "pipeline-bot@ci"
           git config user.name "pipeline-bot"
@@ -639,7 +659,8 @@ jobs:
             echo "✅ update-manifest: passed — ArgoCD will sync commit ${{ github.sha }}" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             REASON="see job log"
-            [ "${{ steps.clone.outcome }}" != "success" ] && REASON="could not clone manifest repo — check MANIFEST_REPO_TOKEN"
+            [ "${{ steps.cfg.outcome }}" != "success" ] && REASON="MANIFEST_REPO not set (Variable or Secret) — no repo slug to clone"
+            [ "${{ steps.clone.outcome }}" != "success" ] && [ "${{ steps.cfg.outcome }}" == "success" ] && REASON="could not clone manifest repo — check MANIFEST_REPO_TOKEN scope and repo name"
             [ "${{ steps.bump.outcome }}" != "success" ] && [ "${{ steps.clone.outcome }}" == "success" ] && REASON="failed to update kustomization.yaml — check paths"
             [ "${{ steps.push-manifest.outcome }}" != "success" ] && [ "${{ steps.bump.outcome }}" == "success" ] && REASON="git push rejected — check branch protection/token scope"
             echo "❌ update-manifest: failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
