@@ -187,11 +187,11 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
-          # TODO(validate): confirm the test runner honors --coverage and
-          # writes lcov to coverage/lcov.info (Jest default) — this repo
-          # already has a coverage/ dir checked in from a prior local run,
-          # remove that from git and let CI regenerate it fresh each time
-          npm test -- --coverage --watchAll=false
+          # --passWithNoTests: this repo currently has no frontend test
+          # files, and Jest exits 1 on "No tests found" which failed the
+          # whole test job. Coverage still lands in coverage/lcov.info
+          # (Jest default) whenever tests do exist.
+          npm test -- --coverage --watchAll=false --passWithNoTests
 
       - name: Archive coverage + test reports
         if: always()
@@ -243,6 +243,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # sonar.java.binaries points at backend/target/classes — this job runs
+      # on a fresh VM, so the classes have to be compiled here (test job's
+      # VM is long gone by now).
+      - name: Compile backend for sonar.java.binaries
+        working-directory: backend
+        run: ./mvnw -B -DskipTests compile
+
       - uses: actions/download-artifact@v4
         with:
           name: coverage-raw
@@ -257,11 +270,11 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           args: >
-            -Dsonar.projectKey=<your-project-key>
+            -Dsonar.projectKey=opsera-mid_project
             -Dsonar.sources=backend/src,frontend/src
             -Dsonar.java.binaries=backend/target/classes
-            -Dsonar.coverage.jacoco.xmlReportPaths=coverage-raw/jacoco.xml
-            -Dsonar.javascript.lcov.reportPaths=coverage-raw/lcov.info
+            -Dsonar.coverage.jacoco.xmlReportPaths=coverage-raw/backend/target/site/jacoco/jacoco.xml
+            -Dsonar.javascript.lcov.reportPaths=coverage-raw/frontend/coverage/lcov.info
 
       - name: Quality Gate check
         id: quality-gate
