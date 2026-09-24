@@ -442,24 +442,32 @@ jobs:
       # ---- Gate 5: ACS policy check against the staged GHCR image ----
       # Prerequisite: a GHCR Image Integration must already be configured
       # in ACS Central, or this fails with "no matching image registries found".
+      #
+      # Pinned deliberately. The "latest" mirror URL silently ships a newer
+      # roxctl that removed the --token flag, so an unpinned download breaks
+      # the step on Anchore/Red Hat's release cadence rather than ours.
       - name: roxctl setup
         id: roxctl-setup
         if: steps.push-ghcr.outcome == 'success'
         continue-on-error: true
         run: |
-          curl -sSL -o roxctl "https://mirror.openshift.com/pub/rhacs/assets/latest/bin/Linux/roxctl"
+          curl -sSL -o roxctl "https://mirror.openshift.com/pub/rhacs/assets/4.11.4/bin/Linux/roxctl"
           chmod +x roxctl
+          ./roxctl version
 
       - name: ACS image check (Gate 5)
         id: acs-check
         if: steps.roxctl-setup.outcome == 'success'
         continue-on-error: true
+        env:
+          # roxctl 4.x takes the API token via the environment; the old
+          # --token flag no longer exists and aborts with "unknown flag".
+          ROX_ENDPOINT: ${{ secrets.ROX_CENTRAL_ENDPOINT }}
+          ROX_API_TOKEN: ${{ secrets.ROX_API_TOKEN }}
+          ROX_INSECURE_CLIENT_SKIP_TLS_VERIFY: "true"
         run: |
           ./roxctl image check \
             --image="${{ steps.push-ghcr.outputs.ghcr_image }}" \
-            --endpoint "${{ secrets.ROX_CENTRAL_ENDPOINT }}" \
-            --token "${{ secrets.ROX_API_TOKEN }}" \
-            --insecure-skip-tls-verify \
             --output json > acs-check-${{ matrix.component }}.json
 
       # ---- Promote to Docker Hub: exact bytes that passed every gate, no rebuild ----
