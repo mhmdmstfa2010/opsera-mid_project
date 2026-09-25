@@ -34,7 +34,9 @@ services:
       context: ./frontend
       dockerfile: ./Dockerfile
     ports:
-      - 3000:3000
+      # host 3000 (unchanged) -> container 8080 (nginx now listens on the
+      # unprivileged port so the same image runs under an OpenShift arbitrary UID)
+      - 3000:8080
     networks:
       - sliit-docker
     depends_on:
