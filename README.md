@@ -19,7 +19,7 @@ individually re-runnable — in the Actions UI.
 - [Pipeline at a glance](#pipeline-at-a-glance)
 - [Repository layout](#repository-layout)
 - [Branch strategy](#branch-strategy)
-- [Results dashboard](#results-dashboard)
+- [Published results](#published-results)
 - [GitOps delivery](#gitops-delivery)
 - [Required secrets and variables](#required-secrets-and-variables)
 - [Image signing and verification](#image-signing-and-verification)
@@ -42,8 +42,6 @@ flowchart TD
     G0 --> SQ["Gate 2 · SonarQube"]
     G1 --> SQ
     T --> SQ
-    T --> DASH["📊 results dashboard"]
-    SQ --> DASH
     SQ -.release only.-> B["build image → GHCR"]
     B --> G3["Gate 3 · Syft SBOM + Grype"]
     B --> G4["Gate 4 · ACS roxctl"]
@@ -92,17 +90,14 @@ until all the gates above it are green.
 ├── ci.yml                  # the only event-triggered workflow
 ├── gate-0-gitleaks.yml     # Gate 0
 ├── gate-1-lint.yml         # Gate 1
-├── tests.yml               # unit tests + coverage
+├── tests.yml               # unit tests + coverage (publishes JUnit results)
 ├── gate-2-sonarqube.yml    # Gate 2
 ├── build.yml               # build → GHCR
 ├── gate-3-sbom-grype.yml   # Gate 3
 ├── gate-4-acs.yml          # Gate 4
 ├── promote.yml             # GHCR → Docker Hub
 ├── sign.yml                # cosign
-├── test-dashboard.yml      # results dashboard
 └── update-manifest.yml     # GitOps tag bump, as a PR
-.ci/
-└── dashboard.py            # parses coverage + SonarQube → run summary
 cosign.pub                  # public key for verifying signed images
 ```
 
@@ -148,7 +143,7 @@ feature/*  ──push──▶   analysis gates only — fast feedback, no image
      └── pull request ──▶  main / develop  ──▶  full pipeline
 ```
 
-| Event | Gates 0–2 + tests + dashboard | Image build, scan, sign, GitOps PR |
+| Event | Gates 0–2 + tests | Image build, scan, sign, GitOps PR |
 | ----- | ---------------------------- | ---------------------------------- |
 | push to `feature/*` | ✅ | ❌ |
 | pull request → `main` / `develop` | ✅ | ❌ |
@@ -179,39 +174,37 @@ the repo files):
 
 ---
 
-## Results dashboard
+## Published results
 
-`📊 results dashboard` renders one page in the run summary. It is the last
-job in the pipeline, so it can report on **every** stage, not just the ones
-that ran before it.
+Test and analysis results are published by the actions that own them, into
+the job summary of the stage that produced them — no separate reporting job
+and no custom script.
 
-| Section | Source |
-| ------- | ------ |
-| **Stages** | pass/fail per stage for this run, plus the **last four runs** side by side so a regression is obvious |
-| **Coverage** | backend line/branch coverage from JaCoCo, frontend from lcov, plus an overall figure |
-| **SonarQube** | Quality Gate, coverage, duplicated lines, bugs, vulnerabilities, security hotspots, code smells — read live from the Sonar API |
+| Results | Published by | Where it appears |
+| ------- | ------------ | ---------------- |
+| Per-suite test results — pass/fail/skip counts, duration, slowest tests, failure annotations | [`dorny/test-reporter`](https://github.com/dorny/test-reporter) in `tests.yml` | `tests` job summary |
+| Quality Gate verdict + coverage, ncloc, duplicated lines, bugs, vulnerabilities, security hotspots, code smells | the SonarQube API, rendered in `gate-2-sonarqube.yml` | Gate 2 job summary |
 
-The stage table takes its rows straight from `ci.yml`, so it cannot drift out
-of sync with the pipeline. History comes from the Actions API (the previous
-runs of this workflow), and a matrix stage such as `Gate 3 · SBOM + Grype`
-collapses its `backend`/`frontend` jobs into one cell — a stage is only green
-if **every** job behind it was.
+Each stage also writes a one-line pass/fail verdict to its own summary, so
+opening a job tells you what happened without reading the log.
 
-Coverage bands follow the usual 80% / 60% thresholds. A component with no
-tests is reported as such rather than as `0%`.
+Both JUnit sources feed the same report: the backend's Surefire XML
+(`backend/target/surefire-reports/TEST-*.xml`) and the frontend's
+`frontend/junit.xml`, which the frontend test step now produces with the
+`jest-junit` reporter. `fail-on-empty` is off because the frontend has no
+test files yet, and an empty glob must not turn a green job red.
 
-The dashboard runs even when a stage fails, so a red run still shows the
-numbers that explain it. GitHub Actions has no streaming widget — "live"
-here means the page is generated at the end of the run from that run's own
-artifacts, the current SonarQube state and the recent run history, not a
-static banner.
+> There is no official SonarSource action that writes a report into the job
+> summary — `sonarqube-quality-gate-report-action` does not exist, and the
+> only community equivalents are unmaintained. So Gate 2 queries the same two
+> API endpoints the quality-gate action already uses and writes the table
+> itself. The `sonarqube-quality-gate-action` still decides pass/fail.
 
-Preview it locally (no token → no history columns):
+Preview the coverage figures locally:
 
 ```bash
-COVERAGE_DIR=coverage-raw SUMMARY_FILE=/tmp/dash.md \
-  STAGE_RESULTS='{"scope":{"outputs":{"release":"false"}}}' \
-  python3 .ci/dashboard.py
+cd backend && ./mvnw -B test        # → target/site/jacoco/jacoco.xml
+cd frontend && npm test -- --coverage --watchAll=false --passWithNoTests
 ```
 
 ---
@@ -244,8 +237,8 @@ The manifest repo must contain **exactly one** `newTag:` line per component
 
 | Secret | Used by | Notes |
 | ------ | ------- | ----- |
-| `SONAR_TOKEN` | Gate 2, dashboard | analysis token from SonarQube |
-| `SONAR_HOST_URL` | Gate 2, dashboard | e.g. `https://your-sonar.example.com` |
+| `SONAR_TOKEN` | Gate 2 | analysis token from SonarQube |
+| `SONAR_HOST_URL` | Gate 2 | e.g. `https://your-sonar.example.com` |
 | `DOCKERHUB_USERNAME` | promote, sign | |
 | `DOCKERHUB_TOKEN` | promote, sign | |
 | `ROX_CENTRAL_ENDPOINT` | Gate 4 | ACS Central address |
@@ -323,13 +316,13 @@ docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:latest detect --so
 cd frontend && npm ci && npm run lint       # ESLint
 docker run --rm -i -v "$PWD/frontend:/f" hadolint/hadolint:latest hadolint -f /f/Dockerfile
 
-# tests + the coverage artifacts the dashboard reads
+# tests — the coverage files SonarQube imports
 cd backend  && ./mvnw -B test                # → target/site/jacoco/jacoco.xml
 cd frontend && npm test -- --coverage --watchAll=false --passWithNoTests
 ```
 
 > The frontend currently has no test files, so `--passWithNoTests` keeps CI
-> green and the dashboard reports the frontend as untested rather than 0%.
+> green, and the published report shows no frontend suites until they exist.
 
 ---
 

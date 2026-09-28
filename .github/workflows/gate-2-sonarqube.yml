@@ -103,6 +103,33 @@ jobs:
           path: sonarqube-report.tar.gz
           retention-days: 7
 
+      - name: SonarQube results
+        if: always()
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          PROJECT_KEY: opsera-mid_project
+        run: |
+          auth="Authorization: Bearer $SONAR_TOKEN"
+          gate=$(curl -sS --max-time 30 -H "$auth" \
+            "$SONAR_HOST_URL/api/qualitygates/project_status?projectKey=$PROJECT_KEY" \
+            | jq -r '.projectStatus.status // "UNKNOWN"')
+          measures=$(curl -sS --max-time 30 -H "$auth" \
+            "$SONAR_HOST_URL/api/measures/component?component=$PROJECT_KEY&metricKeys=coverage,duplicated_lines_density,ncloc,bugs,vulnerabilities,security_hotspots,code_smells")
+          {
+            echo "### SonarQube"
+            echo ""
+            jq -r --arg gate "$gate" '
+              ("| Metric | Value |\n| --- | --- |\n| Quality Gate | " +
+               (if $gate == "OK" then "🟢 OK" else "🔴 " + $gate end) + " |\n") as $head
+              | $head
+              + (if .component.measures
+                 then (.component.measures
+                       | map("| " + .metric + " | " + (.value // "n/a") + " |")
+                       | join("\n") + "\n")
+                 else "| measures | unavailable |\n" end)
+            ' <<< "$measures"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Pass/fail message
         if: always()
         run: |

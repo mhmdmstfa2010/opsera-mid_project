@@ -14,7 +14,7 @@ on:
 permissions:
   contents: read
   packages: write
-  actions: read
+  checks: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -110,25 +110,4 @@ jobs:
     needs: [scope, sign]
     if: needs.scope.outputs.release == 'true'
     uses: ./.github/workflows/update-manifest.yml
-    secrets: inherit
-
-  dashboard:
-    name: 📊 results dashboard
-    needs:
-      - scope
-      - gitleaks
-      - lint
-      - test
-      - sonarqube
-      - build
-      - sbom-scan
-      - acs-check
-      - promote-dockerhub
-      - sign
-      - update-manifest
-    if: ${{ !cancelled() }}
-    uses: ./.github/workflows/test-dashboard.yml
-    with:
-      project-key: opsera-mid_project
-      stage-results: ${{ toJSON(needs) }}
     secrets: inherit

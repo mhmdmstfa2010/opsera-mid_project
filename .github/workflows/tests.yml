@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 jobs:
   test:
@@ -38,7 +39,17 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
-          npm test -- --coverage --watchAll=false --passWithNoTests
+          # --passWithNoTests: this repo currently has no frontend test
+          # files, and Jest exits 1 on "No tests found" which failed the
+          # whole test job. Coverage still lands in coverage/lcov.info
+          # (Jest default) whenever tests do exist.
+          #
+          # --reporters: jest-junit writes frontend/junit.xml, the file the
+          # test-reporter step below reads. Without it only the backend
+          # results would ever be published. `default` is kept so the
+          # console output is unchanged.
+          npm test -- --coverage --watchAll=false --passWithNoTests --ci \
+            --reporters=default --reporters=jest-junit
 
       - name: Archive coverage + test reports
         if: always()
@@ -64,6 +75,26 @@ jobs:
             backend/target/site/jacoco/jacoco.xml
             frontend/coverage/lcov.info
           retention-days: 1
+
+      - name: Publish test results to the run summary
+        if: always()
+        uses: dorny/test-reporter@v2
+        with:
+          name: Test results
+          path: |
+            backend/target/surefire-reports/TEST-*.xml
+            frontend/junit.xml
+          reporter: java-junit
+          # Renders a per-suite table (pass/fail/skip counts, duration,
+          # slowest tests) straight into this job's summary.
+          use-actions-summary: true
+          max-annotations: 20
+          # The frontend has no test files yet, so the glob can legitimately
+          # match nothing — that must not turn the job red.
+          fail-on-empty: false
+          # Publishing is reporting, not a gate; the job verdict comes from
+          # the pass/fail message below.
+          fail-on-error: true
 
       - name: Pass/fail message
         if: always()
