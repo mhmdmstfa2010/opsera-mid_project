@@ -209,10 +209,15 @@ PR comment — granted in **both** `ci.yml` and `tests.yml`, because a called
 workflow only gets the intersection of what the caller allows.
 
 > There is no official SonarSource action that writes a report into the job
-> summary — `sonarqube-quality-gate-report-action` does not exist, and the
-> only community equivalents are unmaintained. So Gate 2 queries the same two
-> API endpoints the quality-gate action already uses and writes the table
-> itself. The `sonarqube-quality-gate-action` still decides pass/fail.
+> summary — `sonarqube-quality-gate-report-action` does not exist (404), and
+> the only community equivalents are unmaintained. So Gate 2 queries the same
+> two API endpoints the quality-gate action already uses and writes the table
+> itself, with a link through to the project. The
+> `sonarqube-quality-gate-action` still decides pass/fail.
+>
+> Both API calls are wrapped so an unreachable SonarQube degrades to `N/A`
+> rows and a warning: a reporting step must never be the reason a green gate
+> turns red.
 
 Preview the coverage figures locally:
 

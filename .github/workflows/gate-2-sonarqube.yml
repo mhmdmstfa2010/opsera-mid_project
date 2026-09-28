@@ -104,31 +104,97 @@ jobs:
           retention-days: 7
 
       - name: SonarQube results
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          PROJECT_KEY: opsera-mid_project
+          SONAR_PROJECT_KEY: opsera-mid_project
         run: |
-          auth="Authorization: Bearer $SONAR_TOKEN"
-          gate=$(curl -sS --max-time 30 -H "$auth" \
-            "$SONAR_HOST_URL/api/qualitygates/project_status?projectKey=$PROJECT_KEY" \
-            | jq -r '.projectStatus.status // "UNKNOWN"')
-          measures=$(curl -sS --max-time 30 -H "$auth" \
-            "$SONAR_HOST_URL/api/measures/component?component=$PROJECT_KEY&metricKeys=coverage,duplicated_lines_density,ncloc,bugs,vulnerabilities,security_hotspots,code_smells")
-          {
-            echo "### SonarQube"
-            echo ""
-            jq -r --arg gate "$gate" '
-              ("| Metric | Value |\n| --- | --- |\n| Quality Gate | " +
-               (if $gate == "OK" then "🟢 OK" else "🔴 " + $gate end) + " |\n") as $head
-              | $head
-              + (if .component.measures
-                 then (.component.measures
-                       | map("| " + .metric + " | " + (.value // "n/a") + " |")
-                       | join("\n") + "\n")
-                 else "| measures | unavailable |\n" end)
-            ' <<< "$measures"
-          } >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          # SONAR_HOST_URL comes from $GITHUB_ENV, where the normalise step
+          # above already stripped it. Reading the secret directly here
+          # would shadow that and reintroduce the whitespace the gate
+          # exists to survive.
+          URL = os.environ["SONAR_HOST_URL"].strip().rstrip("/")
+          TOKEN = os.environ["SONAR_TOKEN"].strip()
+          KEY = os.environ["SONAR_PROJECT_KEY"]
+          SUMMARY = os.environ["GITHUB_STEP_SUMMARY"]
+
+          def get(path, params):
+              query = urllib.parse.urlencode(params)
+              request = urllib.request.Request(
+                  f"{URL}{path}?{query}",
+                  headers={"Authorization": f"Bearer {TOKEN}"})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.loads(response.read().decode())
+
+          def get_safe(path, params):
+              # Reporting must never be the reason a green gate turns red,
+              # so an unreachable or erroring API degrades to a warning.
+              try:
+                  return get(path, params)
+              except Exception as exc:
+                  print(f"::warning::{path} failed: {exc}")
+                  return {}
+
+          gate = (get_safe("/api/qualitygates/project_status",
+                           {"projectKey": KEY})
+                  .get("projectStatus") or {}).get("status", "UNKNOWN")
+
+          measures = {
+              m["metric"]: m.get("value")
+              for m in (get_safe("/api/measures/component", {
+                  "component": KEY,
+                  "metricKeys": "coverage,duplicated_lines_density,ncloc,"
+                                "bugs,vulnerabilities,security_hotspots,"
+                                "code_smells",
+              }).get("component") or {}).get("measures", [])
+          }
+
+          def value(metric, suffix=""):
+              raw = measures.get(metric)
+              if raw in (None, "", "N/A"):
+                  return "N/A"
+              return f"{raw}{suffix}"
+
+          percent = ("coverage", "duplicated_lines_density")
+          rows = [
+              ("Bugs", "bugs"),
+              ("Vulnerabilities", "vulnerabilities"),
+              ("Code smells", "code_smells"),
+              ("Security hotspots", "security_hotspots"),
+              ("Coverage", "coverage"),
+              ("Duplicated lines", "duplicated_lines_density"),
+              ("Lines of code", "ncloc"),
+          ]
+
+          icon = "✅" if gate == "OK" else "❌"
+          lines = [
+              "## SonarQube results",
+              "",
+              f"**Quality Gate:** {icon} `{gate}`",
+              "",
+              "| Metric | Value |",
+              "| :--- | ---: |",
+          ]
+          lines += [
+              f"| {label} | {value(m, '%' if m in percent else '')} |"
+              for label, m in rows
+          ]
+          lines += [
+              "",
+              f"[Open the SonarQube project]({URL}/dashboard?id={KEY})",
+              "",
+          ]
+
+          with open(SUMMARY, "a", encoding="utf-8") as handle:
+              handle.write("\n".join(lines))
+          print("\n".join(lines))
+          PY
 
       - name: Pass/fail message
         if: always()
