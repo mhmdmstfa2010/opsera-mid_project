@@ -182,7 +182,7 @@ and no custom script.
 
 | Results | Published by | Where it appears |
 | ------- | ------------ | ---------------- |
-| Per-suite test results — pass/fail/skip counts, duration, slowest tests, failure annotations | [`dorny/test-reporter`](https://github.com/dorny/test-reporter) in `tests.yml` | `tests` job summary |
+| Test results — pass/fail/error/skip counts, duration, slowest tests, and an annotation per failure | [`EnricoMi/publish-unit-test-result-action`](https://github.com/EnricoMi/publish-unit-test-result-action) in `tests.yml` | `tests` job summary, the commit check, and a comment on the PR |
 | Quality Gate verdict + coverage, ncloc, duplicated lines, bugs, vulnerabilities, security hotspots, code smells | the SonarQube API, rendered in `gate-2-sonarqube.yml` | Gate 2 job summary |
 
 Each stage also writes a one-line pass/fail verdict to its own summary, so
@@ -191,8 +191,22 @@ opening a job tells you what happened without reading the log.
 Both JUnit sources feed the same report: the backend's Surefire XML
 (`backend/target/surefire-reports/TEST-*.xml`) and the frontend's
 `frontend/junit.xml`, which the frontend test step now produces with the
-`jest-junit` reporter. `fail-on-empty` is off because the frontend has no
-test files yet, and an empty glob must not turn a green job red.
+`jest-junit` reporter. The action publishes to the job summary, adds a
+`Test Results` check to the commit, annotates each failure, and comments on
+the pull request when results change (`comment_mode: changes`).
+
+Two settings matter here:
+
+- `action_fail: "false"` — publishing is reporting, not a gate. This action
+  never fails the build on test failures by default; the job verdict comes
+  from the pass/fail step, which checks the test steps directly.
+- The `files` globs are non-fatal when unmatched, so the frontend's missing
+  `junit.xml` (no test files yet) is a warning while the backend glob still
+  supplies the published results.
+
+It needs `checks: write` for the check run and `pull-requests: write` for the
+PR comment — granted in **both** `ci.yml` and `tests.yml`, because a called
+workflow only gets the intersection of what the caller allows.
 
 > There is no official SonarSource action that writes a report into the job
 > summary — `sonarqube-quality-gate-report-action` does not exist, and the

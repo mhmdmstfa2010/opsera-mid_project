@@ -6,6 +6,7 @@ on:
 permissions:
   contents: read
   checks: write
+  pull-requests: write
 
 jobs:
   test:
@@ -76,25 +77,27 @@ jobs:
             frontend/coverage/lcov.info
           retention-days: 1
 
-      - name: Publish test results to the run summary
-        if: always()
-        uses: dorny/test-reporter@v2
+      - name: Publish test results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@v2
         with:
-          name: Test results
-          path: |
+          files: |
             backend/target/surefire-reports/TEST-*.xml
             frontend/junit.xml
-          reporter: java-junit
-          # Renders a per-suite table (pass/fail/skip counts, duration,
-          # slowest tests) straight into this job's summary.
-          use-actions-summary: true
-          max-annotations: 20
-          # The frontend has no test files yet, so the glob can legitimately
-          # match nothing — that must not turn the job red.
-          fail-on-empty: false
-          # Publishing is reporting, not a gate; the job verdict comes from
-          # the pass/fail message below.
-          fail-on-error: true
+          check_name: Test Results
+          report_individual_runs: "true"
+          # Publish to the job summary, the commit check and a PR comment.
+          job_summary: "true"
+          check_run: "true"
+          comment_mode: changes
+          # A glob that matches nothing is a warning, not a failure — the
+          # frontend has no test files yet and the backend glob is expected
+          # to supply the results.
+          fail_on: test failures
+          # Reporting only — the verdict for this job comes from the pass/fail
+          # step below, and this action never fails the build on test failures
+          # by default.
+          action_fail: "false"
 
       - name: Pass/fail message
         if: always()
