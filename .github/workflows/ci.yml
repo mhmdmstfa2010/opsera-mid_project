@@ -69,17 +69,6 @@ jobs:
     uses: ./.github/workflows/gate-2-sonarqube.yml
     secrets: inherit
 
-  dashboard:
-    name: 📊 results dashboard
-    needs: [test, sonarqube]
-    if: ${{ !cancelled() }}
-    uses: ./.github/workflows/test-dashboard.yml
-    with:
-      project-key: opsera-mid_project
-      test-result: ${{ needs.test.result }}
-      sonar-result: ${{ needs.sonarqube.result }}
-    secrets: inherit
-
   build:
     name: build image
     needs: [scope, sonarqube]
@@ -120,4 +109,25 @@ jobs:
     needs: [scope, sign]
     if: needs.scope.outputs.release == 'true'
     uses: ./.github/workflows/update-manifest.yml
+    secrets: inherit
+
+  dashboard:
+    name: 📊 results dashboard
+    needs:
+      - scope
+      - gitleaks
+      - lint
+      - test
+      - sonarqube
+      - build
+      - sbom-scan
+      - acs-check
+      - promote-dockerhub
+      - sign
+      - update-manifest
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/test-dashboard.yml
+    with:
+      project-key: opsera-mid_project
+      stage-results: ${{ toJSON(needs) }}
     secrets: inherit

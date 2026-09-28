@@ -7,29 +7,30 @@ on:
         description: SonarQube project key the analysis gate used
         type: string
         default: opsera-mid_project
-      test-result:
-        description: conclusion of the test job
+      stage-results:
+        description: JSON of every job the orchestrator waited on (toJSON(needs))
         type: string
-        default: unknown
-      sonar-result:
-        description: conclusion of the SonarQube job
-        type: string
-        default: unknown
+        default: '{}'
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   dashboard:
-    name: 📊 test + quality dashboard
+    name: 📊 results dashboard
     runs-on: ubuntu-latest
     continue-on-error: true
     env:
       PROJECT_KEY: ${{ inputs.project-key }}
       SONAR_URL: ${{ secrets.SONAR_HOST_URL }}
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      TEST_RESULT: ${{ inputs.test-result }}
-      SONAR_RESULT: ${{ inputs.sonar-result }}
+      STAGE_RESULTS: ${{ inputs.stage-results }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      GH_WORKFLOW: ci.yml
+      RUN_ID: ${{ github.run_id }}
+      PREVIOUS_RUNS: '4'
     steps:
       - uses: actions/checkout@v4
 

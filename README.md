@@ -177,28 +177,37 @@ the repo files):
 
 ## Results dashboard
 
-`📊 results dashboard` renders one page in the run summary with real numbers
-from that run:
+`📊 results dashboard` renders one page in the run summary. It is the last
+job in the pipeline, so it can report on **every** stage, not just the ones
+that ran before it.
 
-- **Coverage** — backend line/branch coverage parsed from JaCoCo, frontend
-  from lcov, plus an overall figure
-- **Gates** — pass/fail for the test and SonarQube jobs and the Quality Gate
-- **SonarQube** — coverage, duplicated lines, bugs, vulnerabilities, security
-  hotspots and code smells, read live from the Sonar API
+| Section | Source |
+| ------- | ------ |
+| **Stages** | pass/fail per stage for this run, plus the **last four runs** side by side so a regression is obvious |
+| **Coverage** | backend line/branch coverage from JaCoCo, frontend from lcov, plus an overall figure |
+| **SonarQube** | Quality Gate, coverage, duplicated lines, bugs, vulnerabilities, security hotspots, code smells — read live from the Sonar API |
+
+The stage table takes its rows straight from `ci.yml`, so it cannot drift out
+of sync with the pipeline. History comes from the Actions API (the previous
+runs of this workflow), and a matrix stage such as `Gate 3 · SBOM + Grype`
+collapses its `backend`/`frontend` jobs into one cell — a stage is only green
+if **every** job behind it was.
 
 Coverage bands follow the usual 80% / 60% thresholds. A component with no
 tests is reported as such rather than as `0%`.
 
-The dashboard job runs even when a gate fails, so a red run still shows the
+The dashboard runs even when a stage fails, so a red run still shows the
 numbers that explain it. GitHub Actions has no streaming widget — "live"
 here means the page is generated at the end of the run from that run's own
-artifacts and the current SonarQube state, not a static banner.
+artifacts, the current SonarQube state and the recent run history, not a
+static banner.
 
-Preview it locally:
+Preview it locally (no token → no history columns):
 
 ```bash
 COVERAGE_DIR=coverage-raw SUMMARY_FILE=/tmp/dash.md \
-  PROJECT_KEY=opsera-mid_project python3 .ci/dashboard.py
+  STAGE_RESULTS='{"scope":{"outputs":{"release":"false"}}}' \
+  python3 .ci/dashboard.py
 ```
 
 ---
