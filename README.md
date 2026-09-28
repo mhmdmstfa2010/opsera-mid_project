@@ -89,35 +89,39 @@ until all the gates above it are green.
 
 ```
 .github/workflows/
-├── ci.yml                        # the only event-triggered workflow
-├── gates/
-│   ├── 00-gitleaks.yml           # Gate 0
-│   ├── 01-lint.yml               # Gate 1
-│   ├── 02-test.yml               # unit tests + coverage
-│   ├── 03-sonarqube.yml          # Gate 2
-│   ├── 04-build.yml              # build → GHCR
-│   ├── 05-sbom-grype.yml         # Gate 3
-│   ├── 06-acs.yml                # Gate 4
-│   ├── 07-promote.yml            # GHCR → Docker Hub
-│   └── 08-sign.yml               # cosign
-└── reporting/
-    ├── test-dashboard.yml        # results dashboard
-    └── update-manifest.yml       # GitOps tag bump, as a PR
+├── ci.yml                  # the only event-triggered workflow
+├── gate-0-gitleaks.yml     # Gate 0
+├── gate-1-lint.yml         # Gate 1
+├── tests.yml               # unit tests + coverage
+├── gate-2-sonarqube.yml    # Gate 2
+├── build.yml               # build → GHCR
+├── gate-3-sbom-grype.yml   # Gate 3
+├── gate-4-acs.yml          # Gate 4
+├── promote.yml             # GHCR → Docker Hub
+├── sign.yml                # cosign
+├── test-dashboard.yml      # results dashboard
+└── update-manifest.yml     # GitOps tag bump, as a PR
 .ci/
-└── dashboard.py                  # parses coverage + SonarQube → run summary
-cosign.pub                        # public key for verifying signed images
+└── dashboard.py            # parses coverage + SonarQube → run summary
+cosign.pub                  # public key for verifying signed images
 ```
+
+> Reusable workflows **must sit at the top level** of `.github/workflows/`.
+> GitHub rejects the whole file with *"workflows must be defined at the top
+> level of the `.github/workflows/` directory"* if you put them in a
+> subdirectory — the failure surfaces as a run with **zero jobs**, not as a
+> failed job.
 
 ### Adding or changing a stage
 
-Create a new file under `gates/` with `on: workflow_call`, then call it from
-`ci.yml`:
+Create a new workflow file at the top level with `on: workflow_call`, then
+call it from `ci.yml`:
 
 ```yaml
   my-new-gate:
     name: my gate
     needs: [lint]
-    uses: ./.github/workflows/gates/09-my-new-gate.yml
+    uses: ./.github/workflows/gate-5-my-new-gate.yml
     secrets: inherit
 ```
 
@@ -316,6 +320,8 @@ cd frontend && npm test -- --coverage --watchAll=false --passWithNoTests
 | SonarQube scan fails on coverage | run `./mvnw test` first so `jacoco.xml` exists |
 | SonarQube 403 on `project_status` | the tunnel is dead, not the token — the Gate 2 reachability check exists for this |
 | A reusable-workflow stage cannot see an `env:` var | define it inside the called workflow; caller `env:` is not inherited |
+| A run fails with **no jobs at all** | a reusable workflow is in a subdirectory — they must be at the top level of `.github/workflows/` |
+| A run fails with no jobs after adding a stage | check the `uses:` path resolves to a file that exists in the same commit |
 | SBOM missing at the signing stage | it crosses jobs as an artifact, not a file |
 | Manifest stage fails only at the PR step | `MANIFEST_REPO_TOKEN` needs Pull requests: Read & write |
 | Branch protection blocks a merge | re-select the required checks; the names changed when the pipeline was modularised |

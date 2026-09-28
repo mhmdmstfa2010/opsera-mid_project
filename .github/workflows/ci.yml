@@ -50,30 +50,30 @@ jobs:
 
   gitleaks:
     name: Gate 0 · gitleaks
-    uses: ./.github/workflows/gates/00-gitleaks.yml
+    uses: ./.github/workflows/gate-0-gitleaks.yml
     secrets: inherit
 
   lint:
     name: Gate 1 · lint
-    uses: ./.github/workflows/gates/01-lint.yml
+    uses: ./.github/workflows/gate-1-lint.yml
     secrets: inherit
 
   test:
     name: tests
-    uses: ./.github/workflows/gates/02-test.yml
+    uses: ./.github/workflows/tests.yml
     secrets: inherit
 
   sonarqube:
     name: Gate 2 · SonarQube
     needs: [gitleaks, lint, test]
-    uses: ./.github/workflows/gates/03-sonarqube.yml
+    uses: ./.github/workflows/gate-2-sonarqube.yml
     secrets: inherit
 
   dashboard:
     name: 📊 results dashboard
     needs: [test, sonarqube]
     if: ${{ !cancelled() }}
-    uses: ./.github/workflows/reporting/test-dashboard.yml
+    uses: ./.github/workflows/test-dashboard.yml
     with:
       project-key: opsera-mid_project
       test-result: ${{ needs.test.result }}
@@ -84,40 +84,40 @@ jobs:
     name: build image
     needs: [scope, sonarqube]
     if: needs.scope.outputs.release == 'true'
-    uses: ./.github/workflows/gates/04-build.yml
+    uses: ./.github/workflows/build.yml
     secrets: inherit
 
   sbom-scan:
     name: Gate 3 · SBOM + Grype
     needs: [scope, build]
     if: needs.scope.outputs.release == 'true'
-    uses: ./.github/workflows/gates/05-sbom-grype.yml
+    uses: ./.github/workflows/gate-3-sbom-grype.yml
     secrets: inherit
 
   acs-check:
     name: Gate 4 · ACS
     needs: [scope, build]
     if: needs.scope.outputs.release == 'true'
-    uses: ./.github/workflows/gates/06-acs.yml
+    uses: ./.github/workflows/gate-4-acs.yml
     secrets: inherit
 
   promote-dockerhub:
     name: promote to Docker Hub
     needs: [scope, sbom-scan, acs-check]
     if: needs.scope.outputs.release == 'true'
-    uses: ./.github/workflows/gates/07-promote.yml
+    uses: ./.github/workflows/promote.yml
     secrets: inherit
 
   sign:
     name: cosign sign
     needs: [scope, promote-dockerhub]
     if: needs.scope.outputs.release == 'true'
-    uses: ./.github/workflows/gates/08-sign.yml
+    uses: ./.github/workflows/sign.yml
     secrets: inherit
 
   update-manifest:
     name: propose manifest bump
     needs: [scope, sign]
     if: needs.scope.outputs.release == 'true'
-    uses: ./.github/workflows/reporting/update-manifest.yml
+    uses: ./.github/workflows/update-manifest.yml
     secrets: inherit
