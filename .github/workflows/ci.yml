@@ -12,10 +12,11 @@ on:
       - develop
 
 permissions:
-  contents: read
+  contents: write
   packages: write
   checks: write
   pull-requests: write
+  actions: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -24,6 +25,8 @@ concurrency:
 jobs:
   scope:
     name: pipeline scope
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     outputs:
       release: ${{ steps.decide.outputs.release }}
@@ -52,27 +55,40 @@ jobs:
 
   gitleaks:
     name: Gate 0 · gitleaks
+    permissions:
+      contents: read
     uses: ./.github/workflows/gate-0-gitleaks.yml
     secrets: inherit
 
   lint:
     name: Gate 1 · lint
+    permissions:
+      contents: read
     uses: ./.github/workflows/gate-1-lint.yml
     secrets: inherit
 
   test:
     name: tests
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
     uses: ./.github/workflows/tests.yml
     secrets: inherit
 
   sonarqube:
     name: Gate 2 · SonarQube
+    permissions:
+      contents: read
     needs: [gitleaks, lint, test]
     uses: ./.github/workflows/gate-2-sonarqube.yml
     secrets: inherit
 
   build:
     name: build image
+    permissions:
+      contents: read
+      packages: write
     needs: [scope, sonarqube]
     if: needs.scope.outputs.release == 'true'
     uses: ./.github/workflows/build.yml
@@ -80,6 +96,9 @@ jobs:
 
   sbom-scan:
     name: Gate 3 · SBOM + Grype
+    permissions:
+      contents: read
+      packages: write
     needs: [scope, build]
     if: needs.scope.outputs.release == 'true'
     uses: ./.github/workflows/gate-3-sbom-grype.yml
@@ -87,6 +106,9 @@ jobs:
 
   acs-check:
     name: Gate 4 · ACS
+    permissions:
+      contents: read
+      packages: write
     needs: [scope, build]
     if: needs.scope.outputs.release == 'true'
     uses: ./.github/workflows/gate-4-acs.yml
@@ -94,6 +116,9 @@ jobs:
 
   promote-dockerhub:
     name: promote to Docker Hub
+    permissions:
+      contents: read
+      packages: write
     needs: [scope, sbom-scan, acs-check]
     if: needs.scope.outputs.release == 'true'
     uses: ./.github/workflows/promote.yml
@@ -101,6 +126,9 @@ jobs:
 
   sign:
     name: cosign sign
+    permissions:
+      contents: read
+      packages: write
     needs: [scope, promote-dockerhub]
     if: needs.scope.outputs.release == 'true'
     uses: ./.github/workflows/sign.yml
@@ -108,7 +136,96 @@ jobs:
 
   update-manifest:
     name: propose manifest bump
+    permissions:
+      contents: read
     needs: [scope, sign]
     if: needs.scope.outputs.release == 'true'
     uses: ./.github/workflows/update-manifest.yml
     secrets: inherit
+
+  # Builds the combined dashboard from the JUnit XML and the SonarQube API
+  # (waiting on the CE task first), publishes it to the job summary, and
+  # refreshes the generated block in README.md.
+  ci-summary:
+    name: 📊 CI summary
+    needs: [scope, test, sonarqube]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    env:
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: test-results
+          path: test-results
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: sonar-report-task
+          path: sonar-report-task
+
+      - name: Find the previous run for comparison
+        id: previous
+        continue-on-error: true
+        run: |
+          url="${{ github.server_url }}/${{ github.repository }}/actions/workflows/ci.yml/runs?per_page=2&exclude_pull_requests=true"
+          prev=$(curl -sS -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" "$url" \
+            | jq -r '[.workflow_runs[] | select(.id != ${{ github.run_id }})][0].id // empty')
+          [ -n "$prev" ] && echo "run_id=$prev" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        if: steps.previous.outputs.run_id != ''
+        continue-on-error: true
+        with:
+          name: ci-metrics-tests
+          path: previous
+          run-id: ${{ steps.previous.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the CI summary
+        run: |
+          python3 .github/scripts/generate-ci-summary.py \
+            --junit "backend=test-results/backend/target/surefire-reports/TEST-*.xml" \
+            --junit "frontend=test-results/frontend/junit.xml" \
+            --compare-json previous/ci-metrics.json \
+            --sonar-project-key opsera-mid_project \
+            --sonar-ce-task-file sonar-report-task/report-task.txt \
+            --out-json ci-metrics.json \
+            --update-readme README.md \
+            --commit "${{ github.sha }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-metrics-tests
+          path: ci-metrics.json
+          retention-days: 30
+
+      # Only on the default branch, and [skip ci] stops the README commit
+      # from triggering another run, which would otherwise loop forever
+      # because the numbers change slightly on every run.
+      - name: Commit the generated README section
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        continue-on-error: true
+        run: |
+          git config user.name "pipeline-bot[bot]"
+          git config user.email "pipeline-bot@users.noreply.github.com"
+          if git diff --quiet -- README.md; then
+            echo "README already current."
+            exit 0
+          fi
+          git add README.md
+          git commit -q -m "ci: refresh the CI quality section [skip ci]"
+          if ! git push; then
+            echo "::error::Could not push the README update — a branch protection rule is probably blocking the bot. The generated section is in this job's summary."
+          fi

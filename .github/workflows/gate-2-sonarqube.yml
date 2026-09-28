@@ -103,6 +103,17 @@ jobs:
           path: sonarqube-report.tar.gz
           retention-days: 7
 
+      # report-task.txt carries ceTaskId=..., which the ci-summary job polls
+      # so the Quality Gate and measures are read after the analysis is
+      # processed rather than while it is still queued.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sonar-report-task
+          path: .scannerwork/report-task.txt
+          retention-days: 1
+          if-no-files-found: ignore
+
       - name: SonarQube results
         if: ${{ !cancelled() }}
         env:

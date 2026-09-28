@@ -19,7 +19,7 @@ individually re-runnable — in the Actions UI.
 - [Pipeline at a glance](#pipeline-at-a-glance)
 - [Repository layout](#repository-layout)
 - [Branch strategy](#branch-strategy)
-- [Published results](#published-results)
+- [CI reporting](#ci-reporting)
 - [GitOps delivery](#gitops-delivery)
 - [Required secrets and variables](#required-secrets-and-variables)
 - [Image signing and verification](#image-signing-and-verification)
@@ -174,57 +174,41 @@ the repo files):
 
 ---
 
-## Published results
+## CI reporting
 
-Test and analysis results are published by the actions that own them, into
-the job summary of the stage that produced them — no separate reporting job
-and no custom script.
+Two independent layers, both driven by real data — never console scraping.
 
-| Results | Published by | Where it appears |
-| ------- | ------------ | ---------------- |
-| Test results — pass/fail/error/skip counts, duration, slowest tests, and an annotation per failure | [`EnricoMi/publish-unit-test-result-action`](https://github.com/EnricoMi/publish-unit-test-result-action) in `tests.yml` | `tests` job summary, the commit check, and a comment on the PR |
-| Quality Gate verdict + coverage, ncloc, duplicated lines, bugs, vulnerabilities, security hotspots, code smells | the SonarQube API, rendered in `gate-2-sonarqube.yml` | Gate 2 job summary |
+| Layer | What it produces |
+| ----- | ---------------- |
+| `tests` job — [`publish-unit-test-result-action`](https://github.com/EnricoMi/publish-unit-test-result-action) | A `Test Results` check on the commit, an annotation per failure, a PR comment when the numbers change, and a per-suite table in the job summary |
+| `📊 CI summary` job — [`.github/scripts/generate-ci-summary.py`](.github/scripts/generate-ci-summary.py) | The combined dashboard below: tests, suites, failures, run-over-run delta, SonarQube, and the generated README block |
 
-Each stage also writes a one-line pass/fail verdict to its own summary, so
-opening a job tells you what happened without reading the log.
-
-Both JUnit sources feed the same report: the backend's Surefire XML
-(`backend/target/surefire-reports/TEST-*.xml`) and the frontend's
-`frontend/junit.xml`, which the frontend test step now produces with the
-`jest-junit` reporter. The action publishes to the job summary, adds a
-`Test Results` check to the commit, annotates each failure, and comments on
-the pull request when results change (`comment_mode: changes`).
-
-Two settings matter here:
-
-- `action_fail: "false"` — publishing is reporting, not a gate. This action
-  never fails the build on test failures by default; the job verdict comes
-  from the pass/fail step, which checks the test steps directly.
-- The `files` globs are non-fatal when unmatched, so the frontend's missing
-  `junit.xml` (no test files yet) is a warning while the backend glob still
-  supplies the published results.
-
-It needs `checks: write` for the check run and `pull-requests: write` for the
-PR comment — granted in **both** `ci.yml` and `tests.yml`, because a called
-workflow only gets the intersection of what the caller allows.
-
-> There is no official SonarSource action that writes a report into the job
-> summary — `sonarqube-quality-gate-report-action` does not exist (404), and
-> the only community equivalents are unmaintained. So Gate 2 queries the same
-> two API endpoints the quality-gate action already uses and writes the table
-> itself, with a link through to the project. The
-> `sonarqube-quality-gate-action` still decides pass/fail.
->
-> Both API calls are wrapped so an unreachable SonarQube degrades to `N/A`
-> rows and a warning: a reporting step must never be the reason a green gate
-> turns red.
-
-Preview the coverage figures locally:
-
-```bash
-cd backend && ./mvnw -B test        # → target/site/jacoco/jacoco.xml
-cd frontend && npm test -- --coverage --watchAll=false --passWithNoTests
 ```
+JUnit XML ─┐
+           ├─> generate-ci-summary.py ─> $GITHUB_STEP_SUMMARY
+Sonar API ─┘        (waits on ceTaskId)      README.md (between markers)
+```
+
+**Waiting for SonarQube.** The scan writes its Compute Engine task id to
+`.scannerwork/report-task.txt`, which the summary job polls through
+`/api/ce/task` until it leaves `PENDING`. Without that wait, `/api/measures`
+and `/api/qualitygates` answer with the *previous* analysis while the current
+one is still processing.
+
+**Never fabricating numbers.** Every section is omitted rather than guessed
+when its input is missing: no JUnit files means "no test reports were found",
+an unreachable SonarQube means `N/A` rows, and a missing comparison file means
+no delta table. That is also why the generator can never turn a green gate
+red — every API call is wrapped.
+
+**The README block is generated, do not hand-edit it.** The job replaces only
+the text between `<!-- CI-QUALITY-START -->` and `<!-- CI-QUALITY-END -->`
+(and adds the markers if they are missing). The commit message ends with
+`[skip ci]`, so refreshing the README cannot trigger another run — without
+that, every run would change the numbers and start an endless loop.
+
+<!-- CI-QUALITY-START -->
+<!-- CI-QUALITY-END -->
 
 ---
 
