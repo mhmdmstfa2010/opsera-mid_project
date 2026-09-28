@@ -125,14 +125,18 @@ call it from `ci.yml`:
     secrets: inherit
 ```
 
-Two gotchas worth knowing:
+Three gotchas worth knowing:
 
 - **Job-level `env:` in the caller is not inherited.** Define `env:` inside
   the called workflow (that is why `GRYPE_SEVERITY_THRESHOLD` lives in
-  `05-sbom-grype.yml`, not in `ci.yml`).
+  `gate-3-sbom-grype.yml`, not in `ci.yml`).
 - **Called workflows have separate workspaces.** Pass data between them with
   artifacts, not files — the SBOM is uploaded in Gate 3 and downloaded in the
   signing stage for exactly this reason.
+- **Permissions are the intersection of caller and callee.** A called
+  workflow asking for a scope the caller does not grant fails the whole run
+  at startup with *"is requesting 'actions: read', but is only allowed
+  'actions: none'"* — a `startup_failure`, so no job runs at all.
 
 ---
 
@@ -340,6 +344,7 @@ cd frontend && npm test -- --coverage --watchAll=false --passWithNoTests
 | A reusable-workflow stage cannot see an `env:` var | define it inside the called workflow; caller `env:` is not inherited |
 | A run fails with **no jobs at all** | a reusable workflow is in a subdirectory — they must be at the top level of `.github/workflows/` |
 | A run fails with no jobs after adding a stage | check the `uses:` path resolves to a file that exists in the same commit |
+| Run shows `startup_failure` and no jobs | a called workflow requests a permission scope `ci.yml` does not grant — permissions are intersected |
 | SBOM missing at the signing stage | it crosses jobs as an artifact, not a file |
 | Manifest stage fails only at the PR step | `MANIFEST_REPO_TOKEN` needs Pull requests: Read & write |
 | Branch protection blocks a merge | re-select the required checks; the names changed when the pipeline was modularised |
