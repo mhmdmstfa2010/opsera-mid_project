@@ -255,9 +255,18 @@ Since the manifest update is now a pull request, the fine-grained PAT needs
 | Contents | Read & write | create the branch, push the commit |
 | Pull requests | Read & write | open the PR |
 
-Granted on the **manifest repo only**. A token missing the pull-request scope
-still clones and commits fine, then fails when opening the PR — the stage
-names that cause explicitly.
+Granted on the **manifest repo only**.
+
+A token missing the pull-request scope still clones, commits and pushes the
+branch fine, then fails when opening the PR:
+
+```
+Resource not accessible by personal access token
+```
+
+That is the expected symptom, not a broken pipeline — the branch exists on
+the manifest repo with the correct commit, so fixing the scope and re-running
+the stage is enough. A classic PAT needs the `repo` scope instead.
 
 ---
 

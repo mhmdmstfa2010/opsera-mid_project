@@ -91,7 +91,7 @@ jobs:
             [ "${{ steps.cfg.outcome }}" != "success" ] && REASON="MANIFEST_REPO not set (Variable or Secret) — no repo slug to clone"
             [ "${{ steps.clone.outcome }}" != "success" ] && [ "${{ steps.cfg.outcome }}" == "success" ] && REASON="could not clone manifest repo — check MANIFEST_REPO_TOKEN scope and repo name"
             [ "${{ steps.bump.outcome }}" != "success" ] && [ "${{ steps.clone.outcome }}" == "success" ] && REASON="failed to update kustomization.yaml — check paths"
-            [ "${{ steps.pr.outcome }}" != "success" ] && [ "${{ steps.bump.outcome }}" == "success" ] && REASON="could not open the pull request — check the PAT has Pull requests: Read & write"
+            [ "${{ steps.pr.outcome }}" != "success" ] && [ "${{ steps.bump.outcome }}" == "success" ] && REASON="could not open the pull request — the token pushed the branch but GitHub refused the PR. 'Resource not accessible by personal access token' means MANIFEST_REPO_TOKEN lacks the pull-request scope: fine-grained PATs need 'Pull requests: Read & write' (classic PATs need 'repo'). If the scope is already right, the PAT is probably scoped to the wrong repository."
             echo "❌ manifest: failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
