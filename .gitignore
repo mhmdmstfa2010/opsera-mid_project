@@ -111,3 +111,7 @@ coverage-raw/
 bootstrap-sonarqube-rhel.sh
 run-sonarqube-rhel10.sh
 configure-ci-token.sh
+
+# Python bytecode (CI reporting scripts)
+__pycache__/
+*.pyc
