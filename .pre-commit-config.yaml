@@ -4,7 +4,7 @@
 #  Fastest possible feedback: the developer sees problems in seconds instead
 #  of waiting for CI. NOT a security boundary — `git commit --no-verify`
 #  bypasses it, which is why CI repeats these same checks as real gates
-#  (Gate 0 = gitleaks, Gate 1 = hadolint). See docs/pipeline-explained.md § 0.
+#  (Gate 0 = gitleaks, Gate 1 = hadolint). See README.md § Pipeline at a glance.
 #
 #  Install once per clone:
 #      pip install pre-commit

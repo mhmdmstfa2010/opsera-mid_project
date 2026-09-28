@@ -1,0 +1,91 @@
+name: gate-3-sbom-grype
+
+on:
+  workflow_call:
+
+env:
+  GRYPE_SEVERITY_THRESHOLD: high
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  sbom-scan:
+    name: Gate 3 · SBOM + Grype (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    env:
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        id: ghcr-login
+        continue-on-error: true
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Pull staged image from GHCR
+        id: pull
+        if: steps.ghcr-login.outcome == 'success'
+        continue-on-error: true
+        run: docker pull "$GHCR_IMAGE"
+
+      - name: Generate SBOM (syft)
+        id: syft
+        if: steps.pull.outcome == 'success'
+        continue-on-error: true
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.GHCR_IMAGE }}
+          format: cyclonedx-json
+          output-file: sbom-${{ matrix.component }}.json
+
+      - name: Scan SBOM with Grype
+        id: grype
+        if: steps.syft.outcome == 'success'
+        continue-on-error: true
+        uses: anchore/scan-action@v7
+        with:
+          sbom: sbom-${{ matrix.component }}.json
+          fail-build: true
+          severity-cutoff: ${{ env.GRYPE_SEVERITY_THRESHOLD }}
+          only-fixed: true
+          output-format: json
+
+      - uses: actions/upload-artifact@v4
+        if: steps.syft.outcome == 'success'
+        with:
+          name: sbom-${{ matrix.component }}
+          path: sbom-${{ matrix.component }}.json
+          retention-days: 1
+
+      - name: Archive report
+        if: always()
+        run: |
+          mkdir -p report-out
+          find . -maxdepth 1 -iname "*grype*.json" -exec cp {} report-out/ \; 2>/dev/null || true
+          [ -z "$(ls -A report-out 2>/dev/null)" ] && echo "no report produced" > report-out/NO_REPORT.txt
+          tar -czf grype-report-${{ matrix.component }}.tar.gz -C report-out .
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: grype-report-${{ matrix.component }}
+          path: grype-report-${{ matrix.component }}.tar.gz
+          retention-days: 7
+
+      - name: Pass/fail message
+        if: always()
+        run: |
+          if [ "${{ steps.grype.outcome }}" == "success" ]; then
+            echo "✅ Gate 3 Grype (${{ matrix.component }}): passed — no fixable CVEs at or above ${{ env.GRYPE_SEVERITY_THRESHOLD }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            REASON="see grype-report-${{ matrix.component }} artifact and job log for the failing step"
+            [ "${{ steps.syft.outcome }}" != "success" ] && [ "${{ steps.pull.outcome }}" == "success" ] && REASON="SBOM generation failed"
+            [ "${{ steps.grype.outcome }}" != "success" ] && [ "${{ steps.syft.outcome }}" == "success" ] && REASON="vulnerabilities at or above ${{ env.GRYPE_SEVERITY_THRESHOLD }} found"
+            echo "❌ Gate 3 Grype (${{ matrix.component }}): failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

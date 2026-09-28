@@ -1,0 +1,54 @@
+name: results-dashboard
+
+on:
+  workflow_call:
+    inputs:
+      project-key:
+        description: SonarQube project key the analysis gate used
+        type: string
+        default: opsera-mid_project
+      test-result:
+        description: conclusion of the test job
+        type: string
+        default: unknown
+      sonar-result:
+        description: conclusion of the SonarQube job
+        type: string
+        default: unknown
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard:
+    name: 📊 test + quality dashboard
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      PROJECT_KEY: ${{ inputs.project-key }}
+      SONAR_URL: ${{ secrets.SONAR_HOST_URL }}
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      TEST_RESULT: ${{ inputs.test-result }}
+      SONAR_RESULT: ${{ inputs.sonar-result }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: coverage-raw
+          path: coverage-raw
+
+      - name: Build dashboard
+        env:
+          SUMMARY_FILE: ${{ github.step_summary }}
+        run: python3 ./.ci/dashboard.py
+
+      - name: Publish dashboard
+        if: always()
+        run: |
+          if [ -s "$GITHUB_STEP_SUMMARY" ]; then
+            echo "Dashboard published to the run summary."
+          else
+            echo "::warning::dashboard produced no output — coverage artifacts missing?"
+          fi

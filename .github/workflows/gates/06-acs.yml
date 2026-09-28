@@ -1,0 +1,68 @@
+name: gate-4-acs
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  acs-check:
+    name: Gate 4 · ACS (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    env:
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: roxctl setup
+        id: roxctl-setup
+        continue-on-error: true
+        run: |
+          curl -sSL -o roxctl "https://mirror.openshift.com/pub/rhacs/assets/4.11.4/bin/Linux/roxctl"
+          chmod +x roxctl
+          ./roxctl version
+
+      - name: ACS image check
+        id: acs-check
+        if: steps.roxctl-setup.outcome == 'success'
+        continue-on-error: true
+        env:
+          ROX_ENDPOINT: ${{ secrets.ROX_CENTRAL_ENDPOINT }}
+          ROX_API_TOKEN: ${{ secrets.ROX_API_TOKEN }}
+          ROX_INSECURE_CLIENT_SKIP_TLS_VERIFY: "true"
+        run: |
+          ./roxctl image check \
+            --image="$GHCR_IMAGE" \
+            --output json > acs-check-${{ matrix.component }}.json
+
+      - name: Archive report
+        if: always()
+        run: |
+          mkdir -p report-out
+          [ -f acs-check-${{ matrix.component }}.json ] && cp acs-check-${{ matrix.component }}.json report-out/
+          [ -z "$(ls -A report-out 2>/dev/null)" ] && echo "no report produced" > report-out/NO_REPORT.txt
+          tar -czf acs-report-${{ matrix.component }}.tar.gz -C report-out .
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acs-report-${{ matrix.component }}
+          path: acs-report-${{ matrix.component }}.tar.gz
+          retention-days: 7
+
+      - name: Pass/fail message
+        if: always()
+        run: |
+          if [ "${{ steps.acs-check.outcome }}" == "success" ]; then
+            echo "✅ Gate 4 ACS (${{ matrix.component }}): passed" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            REASON="see acs-report-${{ matrix.component }} artifact and job log"
+            [ "${{ steps.roxctl-setup.outcome }}" != "success" ] && REASON="could not download roxctl"
+            [ "${{ steps.acs-check.outcome }}" != "success" ] && [ "${{ steps.roxctl-setup.outcome }}" == "success" ] && REASON="ACS policy violation"
+            echo "❌ Gate 4 ACS (${{ matrix.component }}): failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

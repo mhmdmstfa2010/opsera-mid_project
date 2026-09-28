@@ -1,0 +1,41 @@
+name: promote
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  promote-dockerhub:
+    name: promote to Docker Hub (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    env:
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:${{ github.sha }}
+      FINAL_IMAGE: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ matrix.component }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Promote to Docker Hub (skopeo)
+        id: promote-dockerhub
+        continue-on-error: true
+        run: |
+          docker run --rm quay.io/skopeo/stable copy \
+            --src-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            --dest-creds "${{ secrets.DOCKERHUB_USERNAME }}:${{ secrets.DOCKERHUB_TOKEN }}" \
+            "docker://$GHCR_IMAGE" \
+            "docker://$FINAL_IMAGE"
+
+      - name: Pass/fail message
+        if: always()
+        run: |
+          if [ "${{ steps.promote-dockerhub.outcome }}" == "success" ]; then
+            echo "✅ promote (${{ matrix.component }}): $FINAL_IMAGE" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ promote (${{ matrix.component }}): failed — Docker Hub promotion failed (see job log)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

@@ -111,3 +111,8 @@ coverage-raw/
 bootstrap-sonarqube-rhel.sh
 run-sonarqube-rhel10.sh
 configure-ci-token.sh
+
+# Python (the CI dashboard helper)
+__pycache__/
+*.pyc
+dashboard.md

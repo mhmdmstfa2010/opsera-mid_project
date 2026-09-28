@@ -1,0 +1,58 @@
+name: sign
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    name: sign + attach SBOM (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    env:
+      FINAL_IMAGE: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ matrix.component }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sbom-${{ matrix.component }}
+          path: sbom
+
+      - name: Install cosign
+        id: cosign-setup
+        continue-on-error: true
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image and attach SBOM
+        id: sign
+        if: steps.cosign-setup.outcome == 'success'
+        continue-on-error: true
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" \
+            | docker login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+          printf '%s\n' "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
+          cosign sign --key cosign.key --yes "$FINAL_IMAGE"
+          cosign attach sbom --sbom sbom/sbom-${{ matrix.component }}.json "$FINAL_IMAGE"
+          rm -f cosign.key
+          docker logout docker.io
+
+      - name: Pass/fail message
+        if: always()
+        run: |
+          if [ "${{ steps.sign.outcome }}" == "success" ]; then
+            echo "✅ sign (${{ matrix.component }}): signed image at $FINAL_IMAGE" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            REASON="see job log"
+            [ "${{ steps.cosign-setup.outcome }}" != "success" ] && REASON="could not install cosign"
+            [ "${{ steps.sign.outcome }}" != "success" ] && [ "${{ steps.cosign-setup.outcome }}" == "success" ] && REASON="cosign signing or SBOM attach failed"
+            echo "❌ sign (${{ matrix.component }}): failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

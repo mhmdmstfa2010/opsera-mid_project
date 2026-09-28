@@ -1,0 +1,51 @@
+name: build
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: build (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    env:
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        id: build
+        continue-on-error: true
+        run: docker build -t "$GHCR_IMAGE" ./${{ matrix.component }}
+
+      - name: Log in to GHCR
+        id: ghcr-login
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push to GHCR (staging hand-off)
+        id: push-ghcr
+        if: steps.ghcr-login.outcome == 'success'
+        continue-on-error: true
+        run: docker push "$GHCR_IMAGE"
+
+      - name: Pass/fail message
+        if: always()
+        run: |
+          if [ "${{ steps.push-ghcr.outcome }}" == "success" ]; then
+            echo "✅ build (${{ matrix.component }}): image built and staged at $GHCR_IMAGE" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            REASON="see job log"
+            [ "${{ steps.build.outcome }}" != "success" ] && REASON="docker build failed"
+            [ "${{ steps.ghcr-login.outcome }}" != "success" ] && [ "${{ steps.build.outcome }}" == "success" ] && REASON="GHCR login failed"
+            [ "${{ steps.push-ghcr.outcome }}" != "success" ] && [ "${{ steps.ghcr-login.outcome }}" == "success" ] && REASON="GHCR push failed"
+            echo "❌ build (${{ matrix.component }}): failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

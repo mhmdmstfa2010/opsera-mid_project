@@ -1,0 +1,123 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+      - develop
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  scope:
+    name: pipeline scope
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+    steps:
+      - id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && { \
+               [ "${{ github.ref }}" = "refs/heads/main" ] || \
+               [ "${{ github.ref }}" = "refs/heads/develop" ]; }; then
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Pipeline scope: **release**"
+              echo ""
+              echo "Push to a protected branch — the full pipeline runs and a"
+              echo "GitOps pull request will be opened for the new image tag."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Pipeline scope: **analysis only**"
+              echo ""
+              echo "No image is built, pushed or signed, and the GitOps repo is"
+              echo "never touched. Those steps run only on a push to \`main\` or \`develop\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  gitleaks:
+    name: Gate 0 · gitleaks
+    uses: ./.github/workflows/gates/00-gitleaks.yml
+    secrets: inherit
+
+  lint:
+    name: Gate 1 · lint
+    uses: ./.github/workflows/gates/01-lint.yml
+    secrets: inherit
+
+  test:
+    name: tests
+    uses: ./.github/workflows/gates/02-test.yml
+    secrets: inherit
+
+  sonarqube:
+    name: Gate 2 · SonarQube
+    needs: [gitleaks, lint, test]
+    uses: ./.github/workflows/gates/03-sonarqube.yml
+    secrets: inherit
+
+  dashboard:
+    name: 📊 results dashboard
+    needs: [test, sonarqube]
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/reporting/test-dashboard.yml
+    with:
+      project-key: opsera-mid_project
+      test-result: ${{ needs.test.result }}
+      sonar-result: ${{ needs.sonarqube.result }}
+    secrets: inherit
+
+  build:
+    name: build image
+    needs: [scope, sonarqube]
+    if: needs.scope.outputs.release == 'true'
+    uses: ./.github/workflows/gates/04-build.yml
+    secrets: inherit
+
+  sbom-scan:
+    name: Gate 3 · SBOM + Grype
+    needs: [scope, build]
+    if: needs.scope.outputs.release == 'true'
+    uses: ./.github/workflows/gates/05-sbom-grype.yml
+    secrets: inherit
+
+  acs-check:
+    name: Gate 4 · ACS
+    needs: [scope, build]
+    if: needs.scope.outputs.release == 'true'
+    uses: ./.github/workflows/gates/06-acs.yml
+    secrets: inherit
+
+  promote-dockerhub:
+    name: promote to Docker Hub
+    needs: [scope, sbom-scan, acs-check]
+    if: needs.scope.outputs.release == 'true'
+    uses: ./.github/workflows/gates/07-promote.yml
+    secrets: inherit
+
+  sign:
+    name: cosign sign
+    needs: [scope, promote-dockerhub]
+    if: needs.scope.outputs.release == 'true'
+    uses: ./.github/workflows/gates/08-sign.yml
+    secrets: inherit
+
+  update-manifest:
+    name: propose manifest bump
+    needs: [scope, sign]
+    if: needs.scope.outputs.release == 'true'
+    uses: ./.github/workflows/reporting/update-manifest.yml
+    secrets: inherit

@@ -1,0 +1,114 @@
+name: gate-2-sonarqube
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  sonarqube:
+    runs-on: ubuntu-latest
+    steps:
+      - id: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Normalise SONAR_HOST_URL
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          CLEAN=$(printf '%s' "$SONAR_HOST_URL" | tr -d '[:space:]')
+          if [ -z "$CLEAN" ]; then
+            echo "::error::SONAR_HOST_URL secret is empty"
+            exit 1
+          fi
+          echo "SONAR_HOST_URL=$CLEAN" >> "$GITHUB_ENV"
+          echo "using SONAR_HOST_URL=$CLEAN"
+
+      - name: Verify SonarQube reachability and token
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          code=$(curl -sS -o /tmp/sq-status.json -w '%{http_code}' \
+            --max-time 30 "$SONAR_HOST_URL/api/system/status" || true)
+          if [ "$code" != "200" ]; then
+            echo "::error::SonarQube is not reachable at SONAR_HOST_URL (HTTP $code)."
+            echo "Tunnel providers cap bandwidth or rate limits; a dead tunnel fails here, not in the scan."
+            head -c 500 /tmp/sq-status.json 2>/dev/null || true
+            echo
+            exit 1
+          fi
+          echo "SonarQube reachable: $(cat /tmp/sq-status.json)"
+
+          vcode=$(curl -sS -o /tmp/sq-auth.json -w '%{http_code}' --max-time 30 \
+            -H "Authorization: Bearer $SONAR_TOKEN" \
+            "$SONAR_HOST_URL/api/authentication/validate" || true)
+          if [ "$vcode" != "200" ] || ! grep -q '"valid":true' /tmp/sq-auth.json; then
+            echo "::error::SONAR_TOKEN was rejected by SonarQube (HTTP $vcode): $(cat /tmp/sq-auth.json 2>/dev/null)"
+            exit 1
+          fi
+          echo "SONAR_TOKEN accepted"
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Compile backend for sonar.java.binaries
+        working-directory: backend
+        run: ./mvnw -B -DskipTests compile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-raw
+          path: coverage-raw
+
+      - name: SonarQube Scan
+        id: sonarqube-scan
+        continue-on-error: true
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.projectKey=opsera-mid_project
+            -Dsonar.sources=backend/src,frontend/src
+            -Dsonar.java.binaries=backend/target/classes
+            -Dsonar.coverage.jacoco.xmlReportPaths=coverage-raw/backend/target/site/jacoco/jacoco.xml
+            -Dsonar.javascript.lcov.reportPaths=coverage-raw/frontend/coverage/lcov.info
+
+      - name: Quality Gate check
+        id: quality-gate
+        continue-on-error: true
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Archive report
+        if: always()
+        run: |
+          mkdir -p report-out
+          [ -f .scannerwork ] && cp -r .scannerwork report-out/ 2>/dev/null || true
+          [ -z "$(ls -A report-out 2>/dev/null)" ] && echo "no local report — see SonarQube dashboard"
+          tar -czf sonarqube-report.tar.gz -C report-out .
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sonarqube-report
+          path: sonarqube-report.tar.gz
+          retention-days: 7
+
+      - name: Pass/fail message
+        if: always()
+        run: |
+          if [ "${{ steps.quality-gate.outcome }}" == "success" ]; then
+            echo "✅ sonarqube: Quality Gate passed" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ sonarqube: Quality Gate failed — see ${{ secrets.SONAR_HOST_URL }} for details" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

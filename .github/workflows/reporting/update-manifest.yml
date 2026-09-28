@@ -1,0 +1,97 @@
+name: propose-manifest-bump
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  update-manifest:
+    name: propose manifest bump (PR)
+    runs-on: ubuntu-latest
+    env:
+      MANIFEST_REPO: ${{ vars.MANIFEST_REPO || secrets.MANIFEST_REPO }}
+    steps:
+      - name: Resolve manifest repo slug
+        id: cfg
+        continue-on-error: true
+        run: |
+          SLUG="$(printf '%s' "$MANIFEST_REPO" | tr -d '[:space:]')"
+          if [ -z "$SLUG" ]; then
+            echo "::error::MANIFEST_REPO is empty. Set it under Settings -> Secrets and variables -> Actions, as EITHER a Variable OR a Secret, to owner/repo (currently expected: mhmdmstfa2010/opsera-mid_project_cd)."
+            exit 1
+          fi
+          echo "MANIFEST_REPO=$SLUG" >> "$GITHUB_ENV"
+          echo "using manifest repo: $SLUG"
+
+      - name: Clone manifest repo
+        id: clone
+        if: steps.cfg.outcome == 'success'
+        continue-on-error: true
+        run: |
+          git clone "https://x-access-token:${{ secrets.MANIFEST_REPO_TOKEN }}@github.com/${{ env.MANIFEST_REPO }}.git" manifests
+          cd manifests
+          git config user.email "pipeline-bot@ci"
+          git config user.name "pipeline-bot"
+
+      - name: Bump image tags
+        id: bump
+        if: steps.clone.outcome == 'success'
+        continue-on-error: true
+        working-directory: manifests
+        run: |
+          sed -i "s#newTag: .*#newTag: ${{ github.sha }}#" overlays/production/backend/kustomization.yaml
+          sed -i "s#newTag: .*#newTag: ${{ github.sha }}#" overlays/production/frontend/kustomization.yaml
+          git diff --stat
+          git diff
+
+      - name: Open pull request against the GitOps repo
+        id: pr
+        if: steps.bump.outcome == 'success'
+        continue-on-error: true
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.MANIFEST_REPO_TOKEN }}
+          path: manifests
+          branch: ci/bump-image-tags
+          add-paths: |
+            overlays/production/backend/kustomization.yaml
+            overlays/production/frontend/kustomization.yaml
+          delete-branch: true
+          commit-message: "bump backend+frontend to ${{ github.sha }}"
+          title: "Deploy ${{ github.sha }} (backend + frontend)"
+          body: |
+            Automated image-tag bump from [`${{ github.repository }}`@`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}).
+
+            | Component | Image |
+            | --- | --- |
+            | backend | `docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/backend:${{ github.sha }}` |
+            | frontend | `docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/frontend:${{ github.sha }}` |
+
+            Both images passed every gate before this PR was raised:
+            gitleaks, lint, unit tests, SonarQube Quality Gate, Syft SBOM,
+            Grype, ACS policy check and cosign signing.
+
+            **Nothing in this repo has been modified yet.** Merging this PR is
+            what makes ArgoCD sync the new images to the cluster.
+
+      - name: Pass/fail message
+        if: always()
+        run: |
+          if [ "${{ steps.pr.outcome }}" == "success" ]; then
+            if [ "${{ steps.pr.outputs.pull-request-number }}" != "" ]; then
+              echo "✅ manifest: PR #${{ steps.pr.outputs.pull-request-number }} opened — review and merge to deploy" | tee -a "$GITHUB_STEP_SUMMARY"
+              echo "${{ steps.pr.outputs.pull-request-number }}" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "ℹ️ manifest: tag already current — no PR needed" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            REASON="see job log"
+            [ "${{ steps.cfg.outcome }}" != "success" ] && REASON="MANIFEST_REPO not set (Variable or Secret) — no repo slug to clone"
+            [ "${{ steps.clone.outcome }}" != "success" ] && [ "${{ steps.cfg.outcome }}" == "success" ] && REASON="could not clone manifest repo — check MANIFEST_REPO_TOKEN scope and repo name"
+            [ "${{ steps.bump.outcome }}" != "success" ] && [ "${{ steps.clone.outcome }}" == "success" ] && REASON="failed to update kustomization.yaml — check paths"
+            [ "${{ steps.pr.outcome }}" != "success" ] && [ "${{ steps.bump.outcome }}" == "success" ] && REASON="could not open the pull request — check the PAT has Pull requests: Read & write"
+            echo "❌ manifest: failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
