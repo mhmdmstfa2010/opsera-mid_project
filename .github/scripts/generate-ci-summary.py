@@ -385,21 +385,95 @@ def render_readme(totals, sonar, commit):
     return out
 
 
+# TODO(validate) the field names below against a real
+# acs-report-<component> artifact. reports[].scan.results.policyViolations[]
+# is the documented roxctl shape; the summary variant and a recursive
+# fallback are also tried so an unexpected layout degrades to "unparsed"
+# rather than to a false "no violations".
+def acs_violations(path):
+    """(rows, error) — one row per violated policy occurrence."""
+    if not path or not os.path.isfile(path):
+        return None, "report not available"
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"unreadable ({exc})"
+
+    policies = []
+    for entry in data.get("reports") or []:
+        scan = entry.get("scan") or entry
+        results = scan.get("results") or {}
+        summary = scan.get("summary") or {}
+        policies.extend(results.get("policyViolations") or [])
+        policies.extend(summary.get("policyViolations") or [])
+    if not policies:
+        policies = [node for node in walk_objects(data)
+                    if "policy" in node and "violations" in node]
+
+    rows = []
+    for policy in policies:
+        for violation in policy.get("violations") or []:
+            rows.append({
+                "policy": policy.get("policy") or "unknown policy",
+                "severity": violation.get("severity")
+                            or policy.get("severity") or "—",
+                "message": violation.get("message") or violation.get("cve")
+                           or "no message",
+            })
+    if not rows and policies:
+        rows = [{"policy": p.get("policy") or "unknown policy",
+                 "severity": "—",
+                 "message": "reported without detail"} for p in policies]
+    return rows, None
+
+
+def walk_objects(node):
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from walk_objects(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from walk_objects(item)
+
+
+def render_acs(reports):
+    if not reports:
+        return []
+    out = ["## 🛡️ RHACS image check", ""]
+    for component, path in reports:
+        rows, error = acs_violations(path)
+        if error:
+            out += [f"**{component}** — _{error}_", ""]
+            continue
+        if not rows:
+            out += [f"**{component}** — 🟢 no policy violations", ""]
+            continue
+        out += [f"**{component}** — ❌ {len(rows)} violation(s)", "",
+                "| Policy | Severity | Violation |", "| :--- | :--- | :--- |"]
+        for row in rows[:MAX_FAILURE_ROWS]:
+            message = (row["message"] or "").replace("|", "&#124;")
+            if len(message) > 120:
+                message = message[:120] + "…"
+            out.append(f"| {row['policy']} | {row['severity']} | {message} |")
+        if len(rows) > MAX_FAILURE_ROWS:
+            out += ["",
+                    f"…and {len(rows) - MAX_FAILURE_ROWS} more — see the "
+                    f"`acs-report-{component}` artifact."]
+        out.append("")
+    return out
+
+
 def render_reports(run_url, has_sonar, sonar):
+    # The clickable per-report links are written by the "Add report links"
+    # step in ci.yml, which has the artifact-url outputs; this only adds the
+    # links the generator can build itself.
     out = ["## 📦 Reports", ""]
+    if sonar:
+        out.append(f"- [SonarQube project]({sonar['url']}/dashboard?id={sonar['key']})")
     if run_url:
-        out.append(f"- [Artifacts and logs for this run]({run_url})")
-    else:
-        out.append("- [Workflow runs]")
-    out += [
-        "- Test reports: `test-report` artifact (Surefire + Jest + coverage)",
-        "- Test result metrics: `ci-metrics-tests` artifact",
-    ]
-    if has_sonar:
-        out.append("- SonarQube analysis: `sonarqube-report` artifact")
-        if sonar:
-            out.append(f"- SonarQube project: [{sonar['key']}]"
-                       f"({sonar['url']}/dashboard?id={sonar['key']})")
+        out.append(f"- [All artifacts and logs for this run]({run_url})")
     out.append("")
     return out
 
@@ -429,6 +503,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--junit", action="append", default=[],
                         metavar="GROUP=GLOB")
+    parser.add_argument("--acs-report", action="append", default=[],
+                        metavar="COMPONENT=PATH",
+                        help="path to a roxctl image-check JSON report")
     parser.add_argument("--compare-json", default=None)
     parser.add_argument("--sonar-url", default=None)
     parser.add_argument("--sonar-token", default=None)
@@ -447,6 +524,11 @@ def main():
         if not pattern:
             group, pattern = "tests", group
         groups.append((group, pattern))
+
+    acs_reports = []
+    for entry in args.acs_report:
+        component, _, path = entry.partition("=")
+        acs_reports.append((component or "image", path))
 
     suites, totals = parse_junit(groups)
 
@@ -473,6 +555,7 @@ def main():
         "---",
         "",
         *render_sonar(sonar),
+        *render_acs(acs_reports),
         *render_reports(args.run_url, bool(sonar), sonar),
     ])
 

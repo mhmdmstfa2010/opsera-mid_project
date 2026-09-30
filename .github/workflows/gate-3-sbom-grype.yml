@@ -53,9 +53,13 @@ jobs:
           fail-build: true
           severity-cutoff: ${{ env.GRYPE_SEVERITY_THRESHOLD }}
           only-fixed: true
-          output-format: json
+          # SARIF (the action's own default) so findings reach Security ->
+          # Code scanning; the same file is archived below as well.
+          output-format: sarif
+          output-file: grype-${{ matrix.component }}.sarif
 
       - uses: actions/upload-artifact@v4
+        id: upload-sbom
         if: steps.syft.outcome == 'success'
         with:
           name: sbom-${{ matrix.component }}
@@ -71,14 +75,20 @@ jobs:
           tar -czf grype-report-${{ matrix.component }}.tar.gz -C report-out .
 
       - uses: actions/upload-artifact@v4
+        id: upload-grype-report
         if: always()
         with:
           name: grype-report-${{ matrix.component }}
           path: grype-report-${{ matrix.component }}.tar.gz
           retention-days: 7
 
+      # SHORT summary: verdict plus links. The full CVE detail is in the
+      # "📊 CI summary" aggregator job and in Security -> Code scanning.
       - name: Pass/fail message
         if: always()
+        env:
+          GRYPE_URL: ${{ steps.upload-grype-report.outputs.artifact-url }}
+          SBOM_URL: ${{ steps.upload-sbom.outputs.artifact-url }}
         run: |
           if [ "${{ steps.grype.outcome }}" == "success" ]; then
             echo "✅ Gate 3 Grype (${{ matrix.component }}): passed — no fixable CVEs at or above ${{ env.GRYPE_SEVERITY_THRESHOLD }}" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -87,5 +97,12 @@ jobs:
             [ "${{ steps.syft.outcome }}" != "success" ] && [ "${{ steps.pull.outcome }}" == "success" ] && REASON="SBOM generation failed"
             [ "${{ steps.grype.outcome }}" != "success" ] && [ "${{ steps.syft.outcome }}" == "success" ] && REASON="vulnerabilities at or above ${{ env.GRYPE_SEVERITY_THRESHOLD }} found"
             echo "❌ Gate 3 Grype (${{ matrix.component }}): failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 1
+            RC=1
           fi
+          {
+            echo "[🔎 Findings in code scanning](${{ github.server_url }}/${{ github.repository }}/security/code-scanning)"
+            [ -n "$GRYPE_URL" ] && echo "[📄 Grype report]($GRYPE_URL)"
+            [ -n "$SBOM_URL" ] && echo "[📦 SBOM]($SBOM_URL)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "${RC:-0}"

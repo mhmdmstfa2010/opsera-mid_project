@@ -17,6 +17,7 @@ permissions:
   checks: write
   pull-requests: write
   actions: read
+  security-events: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -57,6 +58,7 @@ jobs:
     name: Gate 0 · gitleaks
     permissions:
       contents: read
+      security-events: write # the called workflow uploads SARIF to code scanning
     uses: ./.github/workflows/gate-0-gitleaks.yml
     secrets: inherit
 
@@ -146,6 +148,14 @@ jobs:
   # Builds the combined dashboard from the JUnit XML and the SonarQube API
   # (waiting on the CE task first), publishes it to the job summary, and
   # refreshes the generated block in README.md.
+  #
+  # SHORT vs DETAILED, one rule for the whole pipeline: every individual gate
+  # job prints only a verdict, one or two headline numbers and a link to its
+  # own report. THIS job is the single DETAILED view — the per-suite test
+  # table, the full SonarQube metrics and the RHACS policy violations all
+  # live here, pulled from artifacts the gates already uploaded rather than
+  # re-run. If you are adding a number, print it in exactly one of the two
+  # places, not both.
   ci-summary:
     name: 📊 CI summary
     needs: [scope, test, sonarqube]
@@ -171,6 +181,20 @@ jobs:
         with:
           name: sonar-report-task
           path: sonar-report-task
+
+      # The ACS reports are downloaded (never re-scanned) so the aggregator
+      # can show the violated policies without re-running anything.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: acs-report-backend
+          path: acs/backend
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: acs-report-frontend
+          path: acs/frontend
 
       - name: Find the previous run for comparison
         id: previous
@@ -199,12 +223,44 @@ jobs:
             --compare-json previous/ci-metrics.json \
             --sonar-project-key opsera-mid_project \
             --sonar-ce-task-file sonar-report-task/report-task.txt \
+            --acs-report "backend=acs/backend/acs-check-backend.json" \
+            --acs-report "frontend=acs/frontend/acs-check-frontend.json" \
             --out-json ci-metrics.json \
             --update-readme README.md \
             --commit "${{ github.sha }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+      # actions/download-artifact@v4 exposes no artifact-url output (only
+      # upload-artifact does), so the links are built from the run's artifact
+      # ids via the API rather than by plumbing outputs across jobs.
+      - name: Add report links
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
+          RUN: ${{ github.run_id }}
+        run: |
+          artifacts=$(gh api "repos/$REPO/actions/runs/$RUN/artifacts?per_page=100" \
+            --jq '.artifacts[] | "\(.name) \(.id)"' 2>/dev/null || true)
+          {
+            echo "### 📦 Reports"
+            echo ""
+            if [ -n "$artifacts" ]; then
+              while read -r name id; do
+                [ -z "${name:-}" ] && continue
+                echo "- [\`$name\`]($SERVER/$REPO/actions/runs/$RUN/artifacts/$id)"
+              done <<< "$artifacts"
+            else
+              echo "_No artifacts were produced for this run._"
+              echo ""
+            fi
+            echo "- [Code scanning — gitleaks and grype findings]($SERVER/$REPO/security/code-scanning)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@v4
+        id: upload-ci-metrics
         if: always()
         with:
           name: ci-metrics-tests

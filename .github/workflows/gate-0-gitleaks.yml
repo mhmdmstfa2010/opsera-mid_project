@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   gitleaks:
@@ -20,34 +21,57 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_REPORT_FORMAT: json
-          GITLEAKS_REPORT_PATH: gitleaks-report.json
+          # SARIF so the findings land in Security -> Code scanning, which is a
+          # browsable report page, and the raw file is still archived below.
+          GITLEAKS_REPORT_FORMAT: sarif
+          GITLEAKS_REPORT_PATH: results.sarif
+
+      - name: Upload findings to code scanning
+        if: always() && hashFiles('results.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+          category: gitleaks
 
       - name: Archive report
         if: always()
         run: |
           mkdir -p report-out
-          if [ -f gitleaks-report.json ]; then
-            cp gitleaks-report.json report-out/
+          if [ -f results.sarif ]; then
+            cp results.sarif report-out/
           else
             echo "no report produced" > report-out/NO_REPORT.txt
           fi
           tar -czf gitleaks-report.tar.gz -C report-out .
 
       - uses: actions/upload-artifact@v4
+        id: upload-gitleaks-report
         if: always()
         with:
           name: gitleaks-report
           path: gitleaks-report.tar.gz
           retention-days: 7
 
+      # This job's summary is the SHORT one: a verdict plus links. The
+      # per-finding detail lives in the code-scanning tab, and the full
+      # roll-up is in the "📊 CI summary" aggregator job.
       - name: Pass/fail message
         if: always()
+        env:
+          ARTIFACT_URL: ${{ steps.upload-gitleaks-report.outputs.artifact-url }}
         run: |
           if [ "${{ steps.gitleaks.outcome }}" == "success" ]; then
             echo "✅ gitleaks: passed, no secrets detected" | tee -a "$GITHUB_STEP_SUMMARY"
+            RC=0
           else
-            REASON=$(jq -r '.[0].RuleID // "see gitleaks-report artifact"' gitleaks-report.json 2>/dev/null || echo "see gitleaks-report artifact")
+            REASON=$(jq -r '.[0].RuleID // "see the report artifact"' results.sarif 2>/dev/null || echo "see the report artifact")
             echo "❌ gitleaks: failed — secret pattern matched ($REASON)" | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 1
+            RC=1
           fi
+          {
+            echo "[🔎 Findings in code scanning](${{ github.server_url }}/${{ github.repository }}/security/code-scanning)"
+            [ -n "$ARTIFACT_URL" ] && echo "[📄 Raw report]($ARTIFACT_URL)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $RC
