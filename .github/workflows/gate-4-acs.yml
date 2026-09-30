@@ -118,6 +118,9 @@ jobs:
               end
           ' "$REPORT" 2>/dev/null) || table="PARSE_ERROR"
 
+          echo "roxctl exit code: ${EXIT_CODE:-n/a}"
+          echo "$table" | head -20
+
           case "$table" in
             NONE)
               {
