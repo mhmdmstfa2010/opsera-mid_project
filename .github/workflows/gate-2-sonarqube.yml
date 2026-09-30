@@ -125,10 +125,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_PROJECT_KEY: opsera-mid_project
         run: |
-          # SONAR_HOST_URL comes from $GITHUB_ENV, where the normalise step
-          # above already stripped it. Reading the secret directly here
-          # would shadow that and reintroduce the whitespace the gate
-          # exists to survive.
+
           URL="${SONAR_HOST_URL}"
           gate=$(curl -sS --max-time 30 -H "Authorization: Bearer $SONAR_TOKEN" \
             "$URL/api/qualitygates/project_status?projectKey=$SONAR_PROJECT_KEY" \
@@ -141,7 +138,7 @@ jobs:
             echo ""
             [ "$gate" = "OK" ] && echo "🟢 Quality Gate: **PASSED**" || echo "🔴 Quality Gate: **FAILED** ($gate)"
             echo ""
-            echo "Coverage: **${coverage}%** · [open the project]($URL/dashboard?id=$SONAR_PROJECT_KEY)"
+            echo "Coverage: **${coverage}%**"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -149,6 +146,7 @@ jobs:
         if: always()
         env:
           REPORT_URL: ${{ steps.upload-sonarqube-report.outputs.artifact-url }}
+          SONAR_PROJECT_KEY: opsera-mid_project
         run: |
           if [ "${{ steps.quality-gate.outcome }}" == "success" ]; then
             echo "✅ sonarqube: Quality Gate passed" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -158,7 +156,9 @@ jobs:
             RC=1
           fi
           {
-            [ -n "$REPORT_URL" ] && echo "[📄 SonarQube report]($REPORT_URL)"
+            URL="${SONAR_HOST_URL%/}"
+            echo "[🔍 Open the SonarQube project]($URL/dashboard?id=$SONAR_PROJECT_KEY)"
+            [ -n "$REPORT_URL" ] && echo "[📄 Scanner artifact]($REPORT_URL)"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
           exit $RC

@@ -53,10 +53,18 @@ jobs:
           fail-build: true
           severity-cutoff: ${{ env.GRYPE_SEVERITY_THRESHOLD }}
           only-fixed: true
-          # SARIF (the action's own default) so findings reach Security ->
-          # Code scanning; the same file is archived below as well.
           output-format: sarif
           output-file: grype-${{ matrix.component }}.sarif
+
+      # The scan output is SARIF, so publish it to Security -> Code scanning,
+      # where it is browsable, as well as archiving it below.
+      - name: Upload findings to code scanning
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: grype-${{ matrix.component }}.sarif
+          category: grype-${{ matrix.component }}
 
       - uses: actions/upload-artifact@v4
         id: upload-sbom
@@ -70,7 +78,8 @@ jobs:
         if: always()
         run: |
           mkdir -p report-out
-          find . -maxdepth 1 -iname "*grype*.json" -exec cp {} report-out/ \; 2>/dev/null || true
+          find . -maxdepth 1 \( -iname "*grype*.sarif" -o -iname "*grype*.json" \) \
+            -exec cp {} report-out/ \; 2>/dev/null || true
           [ -z "$(ls -A report-out 2>/dev/null)" ] && echo "no report produced" > report-out/NO_REPORT.txt
           tar -czf grype-report-${{ matrix.component }}.tar.gz -C report-out .
 
