@@ -138,7 +138,7 @@ jobs:
             echo ""
             [ "$gate" = "OK" ] && echo "🟢 Quality Gate: **PASSED**" || echo "🔴 Quality Gate: **FAILED** ($gate)"
             echo ""
-            echo "Coverage: **${coverage}%** · [open the project]($SONAR_HOST_URL/dashboard?id=$SONAR_PROJECT_KEY)"
+            echo "Coverage: **${coverage}%**"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -146,6 +146,7 @@ jobs:
         if: always()
         env:
           REPORT_URL: ${{ steps.upload-sonarqube-report.outputs.artifact-url }}
+          SONAR_PROJECT_KEY: opsera-mid_project
         run: |
           if [ "${{ steps.quality-gate.outcome }}" == "success" ]; then
             echo "✅ sonarqube: Quality Gate passed" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -155,7 +156,9 @@ jobs:
             RC=1
           fi
           {
-            [ -n "$REPORT_URL" ] && echo "[📄 SonarQube report]($REPORT_URL)"
+            URL="${SONAR_HOST_URL%/}"
+            echo "[🔍 Open the SonarQube project]($URL/dashboard?id=$SONAR_PROJECT_KEY)"
+            [ -n "$REPORT_URL" ] && echo "[📄 Scanner artifact]($REPORT_URL)"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
           exit $RC
