@@ -21,36 +21,6 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  scope:
-    name: pipeline scope
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    outputs:
-      release: ${{ steps.decide.outputs.release }}
-    steps:
-      - id: decide
-        run: |
-          if [ "${{ github.event_name }}" = "push" ] && { \
-               [ "${{ github.ref }}" = "refs/heads/main" ] || \
-               [ "${{ github.ref }}" = "refs/heads/develop" ]; }; then
-            echo "release=true" >> "$GITHUB_OUTPUT"
-            {
-              echo "### Pipeline scope: **release**"
-              echo ""
-              echo "Push to a protected branch — the full pipeline runs and a"
-              echo "GitOps pull request will be opened for the new image tag."
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "release=false" >> "$GITHUB_OUTPUT"
-            {
-              echo "### Pipeline scope: **analysis only**"
-              echo ""
-              echo "No image is built, pushed or signed, and the GitOps repo is"
-              echo "never touched. Those steps run only on a push to \`main\` or \`develop\`."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
   gitleaks:
     name: Gate 0 · gitleaks
     permissions:
@@ -88,8 +58,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-    needs: [scope, sonarqube]
-    if: needs.scope.outputs.release == 'true'
+    needs: [sonarqube]
+    if: github.event_name == 'push'
     uses: ./.github/workflows/build.yml
     secrets: inherit
 
@@ -98,8 +68,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-    needs: [scope, build]
-    if: needs.scope.outputs.release == 'true'
+    needs: [build]
+    if: github.event_name == 'push'
     uses: ./.github/workflows/gate-3-sbom-grype.yml
     secrets: inherit
 
@@ -108,8 +78,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-    needs: [scope, build]
-    if: needs.scope.outputs.release == 'true'
+    needs: [build]
+    if: github.event_name == 'push'
     uses: ./.github/workflows/gate-4-acs.yml
     secrets: inherit
 
@@ -118,8 +88,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-    needs: [scope, sbom-scan, acs-check]
-    if: needs.scope.outputs.release == 'true'
+    needs: [sbom-scan, acs-check]
+    if: github.event_name == 'push'
     uses: ./.github/workflows/promote.yml
     secrets: inherit
 
@@ -128,8 +98,8 @@ jobs:
     permissions:
       contents: read
       packages: write
-    needs: [scope, promote-dockerhub]
-    if: needs.scope.outputs.release == 'true'
+    needs: [promote-dockerhub]
+    if: github.event_name == 'push'
     uses: ./.github/workflows/sign.yml
     secrets: inherit
 
@@ -137,15 +107,15 @@ jobs:
     name: propose manifest bump
     permissions:
       contents: read
-    needs: [scope, sign]
-    if: needs.scope.outputs.release == 'true'
+    needs: [sign]
+    if: github.event_name == 'push'
     uses: ./.github/workflows/update-manifest.yml
     secrets: inherit
 
   #
   ci-summary:
     name: 📊 CI summary
-    needs: [scope, test, sonarqube]
+    needs: [test, sonarqube]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
