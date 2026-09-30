@@ -61,6 +61,7 @@ jobs:
           set -e
 
       - name: Report the policy violations
+        id: violations
         if: always()
         env:
           REPORT: acs-check-${{ matrix.component }}.json
@@ -112,6 +113,25 @@ jobs:
                         (if length > 8 then "MORE\t" + ((length - 8) | tostring) else empty end)
                   end )
                     ' "$REPORT" 2>/dev/null) || table="PARSE_ERROR"
+
+          count=$(jq -r '
+            ( [ .reports[]?.scan.results.policyViolations[]? ]
+              + [ .reports[]?.scan.summary.policyViolations[]? ]
+              + [ .reports[]?.results.policyViolations[]? ]
+              + [ .policyViolations[]? ] )
+              as $direct
+            | ( if ($direct | length) > 0 then $direct
+                else [ .. | objects | select(has("violations")) ] end )
+            | [ .[] | ( .violations // [] )[] ] | length
+          ' "$REPORT" 2>/dev/null) || count=""
+
+          case "$table" in
+            NONE)      count=0 ;;
+            PARSE_ERROR) count="" ;;
+            *)         [ -n "$count" ] || count=8 ;;
+          esac
+
+          echo "violations=${count}" >> "$GITHUB_OUTPUT"
 
           echo "roxctl exit code: ${EXIT_CODE:-n/a}"
           echo "$table" | head -20
@@ -244,6 +264,7 @@ jobs:
         if: always()
         env:
           EXIT_CODE: ${{ steps.acs-check.outputs.exit_code }}
+          VIOLATIONS: ${{ steps.violations.outputs.violations }}
         run: |
           if [ "${{ steps.roxctl-setup.outcome }}" != "success" ]; then
             echo "❌ Gate 4 ACS (${{ matrix.component }}): failed — roxctl could not be downloaded" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -251,6 +272,10 @@ jobs:
           fi
           if [ "${EXIT_CODE}" != "0" ]; then
             echo "❌ Gate 4 ACS (${{ matrix.component }}): failed — roxctl exit \`${EXIT_CODE:-n/a}\`; details above" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if [ -n "$VIOLATIONS" ] && [ "$VIOLATIONS" != "0" ]; then
+            echo "❌ Gate 4 ACS (${{ matrix.component }}): failed — roxctl exited 0 but the report contains \`${VIOLATIONS}\` policy violation(s); the policy is not enforcing, or it is set to audit-only" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           echo "✅ Gate 4 ACS (${{ matrix.component }}): passed" | tee -a "$GITHUB_STEP_SUMMARY"
