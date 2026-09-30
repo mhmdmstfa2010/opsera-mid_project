@@ -35,11 +35,6 @@ jobs:
           ROX_API_TOKEN: ${{ secrets.ROX_API_TOKEN }}
           ROX_INSECURE_CLIENT_SKIP_TLS_VERIFY: "true"
         run: |
-          # `continue-on-error` means steps.acs-check.outcome can never be
-          # trusted, so the real exit code is captured explicitly and that is
-          # what the verdict below reads. Appending `|| true` to the command
-          # instead would discard the violation signal entirely and report a
-          # green gate for a failing scan.
           set +e
           ./roxctl image check \
             --image="$GHCR_IMAGE" \
@@ -47,11 +42,24 @@ jobs:
           code=$?
           set -e
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          echo "roxctl exited $code"
+          echo "roxctl check exited $code"
 
-      # roxctl redirects its report into the JSON file, so without this the
-      # only trace of a violation is an exit code. This step is the DETAILED
-      # view; the pass/fail line below stays deliberately short.
+      - name: ACS image scan
+        id: acs-scan
+        if: steps.roxctl-setup.outcome == 'success'
+        continue-on-error: true
+        env:
+          ROX_ENDPOINT: ${{ secrets.ROX_CENTRAL_ENDPOINT }}
+          ROX_API_TOKEN: ${{ secrets.ROX_API_TOKEN }}
+          ROX_INSECURE_CLIENT_SKIP_TLS_VERIFY: "true"
+        run: |
+          set +e
+          ./roxctl image scan \
+            --image="$GHCR_IMAGE" \
+            --output json > acs-scan-${{ matrix.component }}.json
+          echo "scan exited $?"
+          set -e
+
       - name: Report the policy violations
         if: always()
         env:
@@ -76,11 +84,6 @@ jobs:
             exit 0
           fi
 
-          # TODO(validate) field names below are the documented roxctl
-          # image-check shape (reports[].scan.results.policyViolations[]);
-          # the alternate and recursive fallbacks exist because the exact
-          # layout has not been confirmed against a real artifact yet.
-          # Confirm against acs-report-<component> and drop the fallbacks.
           table=$(jq -r '
             def name_of: (.policy // .policyName // .name // .title
                           // (if .policyId then "policy " + .policyId else null end)
@@ -88,14 +91,11 @@ jobs:
             def msg_of($v): ($v.message // $v.title // $v.cve // $v
                              | tostring);
 
-            # 1) the documented layout
             ( [ .reports[]?.scan.results.policyViolations[]? ]
               + [ .reports[]?.scan.summary.policyViolations[]? ]
               + [ .reports[]?.results.policyViolations[]? ]
               + [ .policyViolations[]? ] )
               as $direct
-            # 2) anything anywhere that carries a violations list, so a
-            #    report keyed only by policyId is not missed
               | ( if ($direct | length) > 0 then $direct
                 else [ .. | objects | select(has("violations")) ] end )
               | [ .[] | ( .violations // [] )[] as $v
@@ -171,11 +171,64 @@ jobs:
               ;;
           esac
 
+      - name: Report the vulnerability scan
+        if: always() && steps.acs-scan.outcome == 'success'
+        env:
+          REPORT: acs-scan-${{ matrix.component }}.json
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          {
+            echo "## RHACS vulnerability scan"
+            echo ""
+            echo "**$COMPONENT** — full CVE report, informational"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ! -s "$REPORT" ]; then
+            echo "_No scan report produced._" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          summary=$(jq -r '
+            (.result.summary // .summary // {}) as $s
+            | "Critical: \($s.CRITICAL // 0) · Important: \($s.IMPORTANT // 0) · Moderate: \($s.MODERATE // 0) · Low: \($s.LOW // 0) · Components: \($s["TOTAL-COMPONENTS"] // "—") · Total CVEs: \($s["TOTAL-VULNERABILITIES"] // "—")"
+          ' "$REPORT" 2>/dev/null) || summary="(could not read summary — see raw artifact)"
+
+          echo "**$summary**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          table=$(jq -r '
+            [ (.result.vulnerabilities // .vulnerabilities // [])[]
+              | select(.cveSeverity == "CRITICAL" or .cveSeverity == "IMPORTANT") ]
+            | sort_by(.cveSeverity) | .[0:10]
+            | if length == 0 then "NONE" else
+                map("| " + .cveId + " | " + .cveSeverity + " | " + .componentName
+                    + " | " + .componentVersion + " | " + (.componentFixedVersion // "—") + " |")
+                | join("\n")
+              end
+          ' "$REPORT" 2>/dev/null) || table="PARSE_ERROR"
+
+          if [ "$table" != "NONE" ] && [ "$table" != "PARSE_ERROR" ]; then
+            {
+              echo "| CVE | Severity | Component | Version | Fixed in |"
+              echo "| :--- | :--- | :--- | :--- | :--- |"
+              echo "$table"
+              echo ""
+              echo "_Showing up to 10 Critical/Important CVEs — full list in the acs-report-$COMPONENT artifact._"
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$table" = "NONE" ]; then
+            echo "_No Critical/Important CVEs found._" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "_Could not parse the scan report — see the raw artifact._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Archive report
         if: always()
         run: |
           mkdir -p report-out
           [ -f acs-check-${{ matrix.component }}.json ] && cp acs-check-${{ matrix.component }}.json report-out/
+          [ -f acs-scan-${{ matrix.component }}.json ] && cp acs-scan-${{ matrix.component }}.json report-out/
           [ -z "$(ls -A report-out 2>/dev/null)" ] && echo "no report produced" > report-out/NO_REPORT.txt
           tar -czf acs-report-${{ matrix.component }}.tar.gz -C report-out .
 

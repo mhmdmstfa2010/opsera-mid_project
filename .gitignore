@@ -115,3 +115,6 @@ configure-ci-token.sh
 # Python bytecode (CI reporting scripts)
 __pycache__/
 *.pyc
+
+
+cosign.pub
