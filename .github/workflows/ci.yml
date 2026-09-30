@@ -1,11 +1,15 @@
 name: ci
 
 on:
-      
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
   pull_request:
     branches:
       - main
-      
+      - develop
 
 permissions:
   contents: write
@@ -214,7 +218,6 @@ jobs:
             --commit "${{ github.sha }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-     
       - name: Add report links
         if: always()
         env:
@@ -249,7 +252,6 @@ jobs:
           path: ci-metrics.json
           retention-days: 30
 
-     
       - name: Commit the generated README section
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         continue-on-error: true
