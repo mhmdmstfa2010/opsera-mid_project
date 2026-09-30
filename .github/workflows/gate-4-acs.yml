@@ -82,49 +82,69 @@ jobs:
           # layout has not been confirmed against a real artifact yet.
           # Confirm against acs-report-<component> and drop the fallbacks.
           table=$(jq -r '
-            def entries:
-              ( [ .reports[]?.scan.results.policyViolations[]? ]
-                + [ .reports[]?.scan.summary.policyViolations[]? ] )
-              as $policies
-              | if ($policies | length) > 0 then
-                  [ $policies[] | . as $p
-                    | (($p.violations // [])[]) as $v
-                    | { policy:  ($p.policy // "unknown policy"),
-                        id:      ($p.policyId // ""),
-                        sev:     ($v.severity // $p.severity // "—"),
-                        message: ($v.message // $v.cve // "no message") } ]
-                else
-                  [ .. | objects | select(has("policy")) | . as $p
-                    | (($p.violations // [])[]) as $v
-                    | { policy:  ($p.policy // "unknown policy"),
-                        id:      ($p.policyId // ""),
-                        sev:     ($v.severity // $p.severity // "—"),
-                        message: ($v.message // $v.cve // "no message") } ]
-                end;
+            def name_of: (.policy // .policyName // .name // .title
+                          // (if .policyId then "policy " + .policyId else null end)
+                          // "unknown policy");
+            def msg_of($v): ($v.message // $v.title // $v.cve // $v
+                             | tostring);
 
-            ( entries ) as $rows
-            | ($rows | length) as $total
-            | if $total == 0 then
-                "NONE"
-              else
-                ( $rows[0:8]
-                  | map("| " + (.policy | gsub("[|]"; "&#124;"))
-                          + " | " + (.sev | gsub("[|]"; "&#124;"))
-                          + " | " + ((.message | gsub("[|]"; "&#124;"))[0:120])
-                          + " |") | join("\n") ),
-                ((if $total > 8 then
-                    "MORE\t" + ($total - 8 | tostring)
-                  else empty end))
-              end
-          ' "$REPORT" 2>/dev/null) || table="PARSE_ERROR"
+            # 1) the documented layout
+            ( [ .reports[]?.scan.results.policyViolations[]? ]
+              + [ .reports[]?.scan.summary.policyViolations[]? ]
+              + [ .reports[]?.results.policyViolations[]? ]
+              + [ .policyViolations[]? ] )
+              as $direct
+            # 2) anything anywhere that carries a violations list, so a
+            #    report keyed only by policyId is not missed
+              | ( if ($direct | length) > 0 then $direct
+                else [ .. | objects | select(has("violations")) ] end )
+              | [ .[] | ( .violations // [] )[] as $v
+                  | { policy: name_of, sev: ( ($v.severity // .severity // "—")
+                                              | tostring ),
+                      message: msg_of($v) } ]
+              | ( if length == 0 then "NONE"
+                  else (.[0:8]
+                        | map("| " + (.policy | gsub("[|]"; "&#124;"))
+                                + " | " + (.sev | gsub("[|]"; "&#124;"))
+                                + " | " + ((.message | gsub("[|]"; "&#124;"))[0:120])
+                                + " |")
+                        | join("\n")),
+                        (if length > 8 then "MORE\t" + ((length - 8) | tostring) else empty end)
+                  end )
+                    ' "$REPORT" 2>/dev/null) || table="PARSE_ERROR"
 
           echo "roxctl exit code: ${EXIT_CODE:-n/a}"
           echo "$table" | head -20
 
+          if [ "${EXIT_CODE}" != "0" ] && { [ "$table" = "NONE" ] || [ "$table" = "PARSE_ERROR" ]; }; then
+            {
+              echo "### ⚠️ Scan failed, but no violations could be read from the report"
+              echo ""
+              echo "roxctl exited \`${EXIT_CODE}\`, so this **is** a failure — the report"
+              echo "just did not parse into a violations list. Structure of \`$REPORT\`:"
+              echo ""
+              echo '```'
+              jq -r 'if type == "object" then
+                       ( "top-level keys: " + (keys | join(", ")) ), "",
+                       ( [ paths(scalars) as $p
+                           | ($p | map(tostring) | join(".")) as $path
+                           | select($path | test("violation|policy|error|fail"; "i"))
+                           | "  " + $path + " = " + (getpath($p) | tostring)[0:80] ]
+                         | .[0:25] | join("\n") )
+                     else "not an object: " + type end' "$REPORT" 2>/dev/null | head -30
+              echo '```'
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           case "$table" in
             NONE)
               {
-                echo "### 🟢 No policy violations"
+                if [ "${EXIT_CODE}" = "0" ]; then
+                  echo "### 🟢 No policy violations"
+                else
+                  echo "### ❌ No violations could be extracted (see the structure above)"
+                fi
                 echo ""
               } >> "$GITHUB_STEP_SUMMARY"
               ;;
@@ -177,7 +197,7 @@ jobs:
             exit 1
           fi
           if [ "${EXIT_CODE}" != "0" ]; then
-            echo "❌ Gate 4 ACS (${{ matrix.component }}): failed — policy violation (roxctl exit \`${EXIT_CODE:-n/a}\`); details above" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "❌ Gate 4 ACS (${{ matrix.component }}): failed — roxctl exit \`${EXIT_CODE:-n/a}\`; details above" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           echo "✅ Gate 4 ACS (${{ matrix.component }}): passed" | tee -a "$GITHUB_STEP_SUMMARY"
