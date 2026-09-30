@@ -22,8 +22,13 @@
         <!-- Boot 3.5.16 pins tomcat 10.1.55, which has 3 Critical advisories
              fixed in 10.1.58 — Gate 4 (Grype, fixable >= high) fails on them. -->
         <tomcat.version>10.1.60</tomcat.version>
-        <!-- clear the last fixable Mediums so the SBOM is clean at every level -->
-        <jackson-bom.version>2.21.5</jackson-bom.version>
+        <!-- clear the last fixable Mediums so the SBOM is clean at every level.
+             2.21.5 is affected by GHSA-q4xh-88c3-wmh7 (Duration
+             XMLGregorianCalendar unbounded number parse DoS, High) plus two
+             Medium advisories; all three are fixed in 2.21.6. That advisory
+             was published on 2026-09-28, which is why Gate 3 (Grype, fixable
+             >= high) turned red on an image whose code had not changed. -->
+        <jackson-bom.version>2.21.6</jackson-bom.version>
         <log4j2.version>2.25.5</log4j2.version>
     </properties>
     <dependencies>
