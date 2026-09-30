@@ -37,7 +37,82 @@ jobs:
         run: |
           ./roxctl image check \
             --image="$GHCR_IMAGE" \
-            --output json > acs-check-${{ matrix.component }}.json
+            --output json > acs-check-${{ matrix.component }}.json || true
+
+      # roxctl redirects everything into the JSON file, so without this the
+      # only trace of a policy violation is "exit code 1". Surface the
+      # violated policy names in the job summary.
+      - name: Report the policy violations
+        if: always()
+        env:
+          REPORT: acs-check-${{ matrix.component }}.json
+          COMPONENT: ${{ matrix.component }}
+          IMAGE: ${{ env.GHCR_IMAGE }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          report = os.environ["REPORT"]
+          component = os.environ["COMPONENT"]
+          image = os.environ["IMAGE"]
+          try:
+              with open(report, encoding="utf-8") as handle:
+                  data = json.load(handle)
+          except Exception as exc:
+              print(f"::warning::could not read {report}: {exc}")
+              raise SystemExit(0)
+
+          def walk(node, path=()):
+              if isinstance(node, dict):
+                  for key, value in node.items():
+                      yield from walk(value, path + (key,))
+              elif isinstance(node, list):
+                  for item in node:
+                      yield from walk(item, path)
+              else:
+                  yield path, node
+
+          reports = data.get("reports") or [data]
+          lines = ["## RHACS image check", "", f"**{component}** · `{image}`", ""]
+          violations = []
+
+          for entry in reports:
+              scan = entry.get("scan", entry)
+              summary = scan.get("summary") or {}
+              for policy in summary.get("policyViolations") or []:
+                  violations.append({
+                      "policy": policy.get("policy") or "?",
+                      "id": policy.get("policyId", ""),
+                      "count": len(policy.get("violations") or []),
+                  })
+              results = scan.get("results") or {}
+              for name, value in results.items():
+                  if name == "policyViolations":
+                      continue
+              if not violations and summary.get("policyViolationCount"):
+                  violations.append({"policy": "see acs-check json",
+                                      "id": "", "count": summary["policyViolationCount"]})
+
+          if violations:
+              lines += ["### ❌ Policy violations", "",
+                        "| Policy | Violations |", "| :--- | ---: |"]
+              for item in violations:
+                  lines.append(f"| {item['policy']} | {item['count']} |")
+          else:
+              lines += ["### 🟢 No policy violations", ""]
+
+          counts = {k: v for k, v in ((scan.get("summary") or {}).items())
+                    if isinstance(v, int) and not k.endswith("Count")}
+          if counts:
+              lines += ["| Scan metric | Count |", "| :--- | ---: |"]
+              for key, value in sorted(counts.items()):
+                  lines.append(f"| {key} | {value} |")
+              lines.append("")
+
+          text = "\n".join(lines)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
+              handle.write(text)
+          print(text)
+          PY
 
       - name: Archive report
         if: always()
