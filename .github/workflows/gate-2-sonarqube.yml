@@ -97,6 +97,7 @@ jobs:
           tar -czf sonarqube-report.tar.gz -C report-out .
 
       - uses: actions/upload-artifact@v4
+        id: upload-sonarqube-report
         if: always()
         with:
           name: sonarqube-report
@@ -107,6 +108,7 @@ jobs:
       # so the Quality Gate and measures are read after the analysis is
       # processed rather than while it is still queued.
       - uses: actions/upload-artifact@v4
+        id: upload-sonar-report-task
         if: always()
         with:
           name: sonar-report-task
@@ -114,105 +116,49 @@ jobs:
           retention-days: 1
           if-no-files-found: ignore
 
+      # SHORT summary: the gate verdict and a link. The full metrics table is
+      # produced by the "📊 CI summary" aggregator job, which reads the same
+      # API — this avoids printing the same numbers in two places.
       - name: SonarQube results
-        if: ${{ !cancelled() }}
+        if: always()
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_PROJECT_KEY: opsera-mid_project
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import urllib.parse
-          import urllib.request
-
           # SONAR_HOST_URL comes from $GITHUB_ENV, where the normalise step
           # above already stripped it. Reading the secret directly here
           # would shadow that and reintroduce the whitespace the gate
           # exists to survive.
-          URL = os.environ["SONAR_HOST_URL"].strip().rstrip("/")
-          TOKEN = os.environ["SONAR_TOKEN"].strip()
-          KEY = os.environ["SONAR_PROJECT_KEY"]
-          SUMMARY = os.environ["GITHUB_STEP_SUMMARY"]
-
-          def get(path, params):
-              query = urllib.parse.urlencode(params)
-              request = urllib.request.Request(
-                  f"{URL}{path}?{query}",
-                  headers={"Authorization": f"Bearer {TOKEN}"})
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  return json.loads(response.read().decode())
-
-          def get_safe(path, params):
-              # Reporting must never be the reason a green gate turns red,
-              # so an unreachable or erroring API degrades to a warning.
-              try:
-                  return get(path, params)
-              except Exception as exc:
-                  print(f"::warning::{path} failed: {exc}")
-                  return {}
-
-          gate = (get_safe("/api/qualitygates/project_status",
-                           {"projectKey": KEY})
-                  .get("projectStatus") or {}).get("status", "UNKNOWN")
-
-          measures = {
-              m["metric"]: m.get("value")
-              for m in (get_safe("/api/measures/component", {
-                  "component": KEY,
-                  "metricKeys": "coverage,duplicated_lines_density,ncloc,"
-                                "bugs,vulnerabilities,security_hotspots,"
-                                "code_smells",
-              }).get("component") or {}).get("measures", [])
-          }
-
-          def value(metric, suffix=""):
-              raw = measures.get(metric)
-              if raw in (None, "", "N/A"):
-                  return "N/A"
-              return f"{raw}{suffix}"
-
-          percent = ("coverage", "duplicated_lines_density")
-          rows = [
-              ("Bugs", "bugs"),
-              ("Vulnerabilities", "vulnerabilities"),
-              ("Code smells", "code_smells"),
-              ("Security hotspots", "security_hotspots"),
-              ("Coverage", "coverage"),
-              ("Duplicated lines", "duplicated_lines_density"),
-              ("Lines of code", "ncloc"),
-          ]
-
-          icon = "✅" if gate == "OK" else "❌"
-          lines = [
-              "## SonarQube results",
-              "",
-              f"**Quality Gate:** {icon} `{gate}`",
-              "",
-              "| Metric | Value |",
-              "| :--- | ---: |",
-          ]
-          lines += [
-              f"| {label} | {value(m, '%' if m in percent else '')} |"
-              for label, m in rows
-          ]
-          lines += [
-              "",
-              f"[Open the SonarQube project]({URL}/dashboard?id={KEY})",
-              "",
-          ]
-
-          with open(SUMMARY, "a", encoding="utf-8") as handle:
-              handle.write("\n".join(lines))
-          print("\n".join(lines))
-          PY
+          URL="${SONAR_HOST_URL}"
+          gate=$(curl -sS --max-time 30 -H "Authorization: Bearer $SONAR_TOKEN" \
+            "$URL/api/qualitygates/project_status?projectKey=$SONAR_PROJECT_KEY" \
+            | jq -r '.projectStatus.status // "UNKNOWN"')
+          coverage=$(curl -sS --max-time 30 -H "Authorization: Bearer $SONAR_TOKEN" \
+            "$URL/api/measures/component?component=$SONAR_PROJECT_KEY&metricKeys=coverage" \
+            | jq -r '.component.measures[0].value // "n/a"')
+          {
+            echo "## SonarQube"
+            echo ""
+            [ "$gate" = "OK" ] && echo "🟢 Quality Gate: **PASSED**" || echo "🔴 Quality Gate: **FAILED** ($gate)"
+            echo ""
+            echo "Coverage: **${coverage}%** · [open the project]($URL/dashboard?id=$SONAR_PROJECT_KEY)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Pass/fail message
         if: always()
+        env:
+          REPORT_URL: ${{ steps.upload-sonarqube-report.outputs.artifact-url }}
         run: |
           if [ "${{ steps.quality-gate.outcome }}" == "success" ]; then
             echo "✅ sonarqube: Quality Gate passed" | tee -a "$GITHUB_STEP_SUMMARY"
+            RC=0
           else
-            echo "❌ sonarqube: Quality Gate failed — see ${{ secrets.SONAR_HOST_URL }} for details" | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 1
+            echo "❌ sonarqube: Quality Gate failed" | tee -a "$GITHUB_STEP_SUMMARY"
+            RC=1
           fi
+          {
+            [ -n "$REPORT_URL" ] && echo "[📄 SonarQube report]($REPORT_URL)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $RC

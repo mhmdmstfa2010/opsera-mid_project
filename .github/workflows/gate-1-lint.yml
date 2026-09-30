@@ -69,23 +69,33 @@ jobs:
           tar -czf lint-report.tar.gz -C report-out .
 
       - uses: actions/upload-artifact@v4
+        id: upload-lint-report
         if: always()
         with:
           name: lint-report
           path: lint-report.tar.gz
           retention-days: 7
 
+      # SHORT summary: verdict plus a link. The full roll-up is in the
+      # "📊 CI summary" aggregator job.
       - name: Pass/fail message
         if: always()
+        env:
+          ARTIFACT_URL: ${{ steps.upload-lint-report.outputs.artifact-url }}
         run: |
-          FAILED=""
-          [ "${{ steps.hadolint-backend.outcome }}" != "success" ] && FAILED="$FAILED hadolint-backend"
-          [ "${{ steps.hadolint-frontend.outcome }}" != "success" ] && FAILED="$FAILED hadolint-frontend"
-          [ "${{ steps.lint-backend.outcome }}" != "success" ] && FAILED="$FAILED checkstyle-backend"
-          [ "${{ steps.lint-frontend.outcome }}" != "success" ] && FAILED="$FAILED eslint-frontend"
-          if [ -z "$FAILED" ]; then
+          FAILED=()
+          [ "${{ steps.hadolint-backend.outcome }}" != "success" ] && FAILED+=("hadolint-backend")
+          [ "${{ steps.hadolint-frontend.outcome }}" != "success" ] && FAILED+=("hadolint-frontend")
+          [ "${{ steps.lint-backend.outcome }}" != "success" ] && FAILED+=("checkstyle-backend")
+          [ "${{ steps.lint-frontend.outcome }}" != "success" ] && FAILED+=("eslint-frontend")
+          if [ ${#FAILED[@]} -eq 0 ]; then
             echo "✅ lint: passed (backend + frontend)" | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo "❌ lint: failed —$FAILED (see lint-report artifact)" | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 1
+            echo "❌ lint: failed —${FAILED[*]}" | tee -a "$GITHUB_STEP_SUMMARY"
+            RC=1
           fi
+          {
+            [ -n "$ARTIFACT_URL" ] && echo "[📄 Lint report]($ARTIFACT_URL)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "${RC:-0}"
