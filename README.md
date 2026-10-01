@@ -16,7 +16,7 @@ individually re-runnable — in the Actions UI.
 
 ## Table of contents
 
-- [Pipeline at a glance](#pipeline-at-a-glance)
+- [Pipeline overview](#pipeline-overview)
 - [Repository layout](#repository-layout)
 - [Branch strategy](#branch-strategy)
 - [CI reporting](#ci-reporting)
@@ -28,29 +28,9 @@ individually re-runnable — in the Actions UI.
 
 ---
 
-## Pipeline at a glance
+## Pipeline overview
 
-`ci.yml` is the only workflow that listens to GitHub events. It calls each
-stage as a reusable workflow and wires the order.
-
-```mermaid
-flowchart TD
-    E["push / pull_request"] --> SC["scope<br/>analysis-only or release?"]
-    SC --> G0["Gate 0 · gitleaks"]
-    SC --> G1["Gate 1 · lint"]
-    SC --> T["tests · JUnit + Jest"]
-    G0 --> SQ["Gate 2 · SonarQube"]
-    G1 --> SQ
-    T --> SQ
-    SQ -.release only.-> B["build image → GHCR"]
-    B --> G3["Gate 3 · Syft SBOM + Grype"]
-    B --> G4["Gate 4 · ACS roxctl"]
-    G3 --> P["promote → Docker Hub"]
-    G4 --> P
-    P --> S["cosign sign + SBOM attestation"]
-    S --> M["propose manifest bump<br/>PULL REQUEST"]
-    M --> ARGO["merge → ArgoCD syncs"]
-```
+![DevSecOps CI/CD pipeline: gates from source code to GitOps deployment](docs/images/pipeline-overview.png)
 
 | # | Stage | Tooling | Fails on |
 | - | ----- | ------- | -------- |
