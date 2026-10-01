@@ -78,7 +78,6 @@ until all the gates above it are green.
 ├── promote.yml             # GHCR → Docker Hub
 ├── sign.yml                # cosign
 └── update-manifest.yml     # GitOps tag bump, as a PR
-cosign.pub                  # public key for verifying signed images
 ```
 
 > Reusable workflows **must sit at the top level** of `.github/workflows/`.
