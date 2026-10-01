@@ -117,4 +117,15 @@ __pycache__/
 *.pyc
 
 
+# Cosign keypair material. The private half must never be committed; the
+# public half is untracked so the keypair is regenerated per environment
+# rather than shared. NOTE: cosign.pub was previously *tracked*, which makes
+# a .gitignore entry a no-op — git only ignores untracked paths. It was
+# removed from the index with `git rm --cached` for that reason.
 cosign.pub
+cosign.key
+
+# Generated report artifacts. The infographic that IS committed lives at
+# docs/images/pipeline-overview.png; these are the working copies.
+DevSecOps_Pipeline_Report*.pdf
+DevSecOps CI_CD Pipeline Infographic.png
