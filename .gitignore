@@ -129,3 +129,7 @@ cosign.key
 # docs/images/pipeline-overview.png; these are the working copies.
 DevSecOps_Pipeline_Report*.pdf
 DevSecOps CI_CD Pipeline Infographic.png
+
+# Local working notes, not part of the deliverable. Was committed, so it had
+# to be removed from the index (git only ignores untracked paths).
+docs/PROJECT-CONTEXT.md
