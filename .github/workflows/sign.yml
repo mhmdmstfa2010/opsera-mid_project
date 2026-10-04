@@ -23,6 +23,36 @@ jobs:
           name: sbom-${{ matrix.component }}
           path: sbom
 
+      # Resolve the promoted image to an immutable digest reference. Signing a
+      # tag would sign "whatever this tag points at right now"; cosign's
+      # signature is bound to the digest, so the digest is what must be signed.
+      #
+      # `skopeo inspect --tls-verify` is the correct flag on this runner. Do
+      # NOT substitute `--src-tls-verify`/`--dest-tls-verify` (those are
+      # `copy` flags) and do NOT use `docker inspect
+      # --format='{{index .RepoDigests 0}}'` — verified against a real
+      # registry, that reports a STALE digest inherited from the base image,
+      # not the manifest that was actually pushed.
+      - name: Resolve promoted image digest
+        id: digest
+        continue-on-error: true
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$DOCKERHUB_TOKEN" \
+            | skopeo login --username "$DOCKERHUB_USERNAME" \
+                --password-stdin --tls-verify docker.io
+          DIGEST="$(skopeo inspect --tls-verify --creds "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
+                      --format '{{.Digest}}' "docker://$FINAL_IMAGE")"
+          case "$DIGEST" in
+            sha256:*) ;;
+            *) echo "::error::unexpected digest '$DIGEST' for $FINAL_IMAGE"; exit 1 ;;
+          esac
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "resolved $FINAL_IMAGE -> $DIGEST"
+
       - name: Install cosign
         id: cosign-setup
         continue-on-error: true
@@ -30,17 +60,20 @@ jobs:
 
       - name: Sign image and attach SBOM
         id: sign
-        if: steps.cosign-setup.outcome == 'success'
+        if: steps.cosign-setup.outcome == 'success' && steps.digest.outcome == 'success'
         continue-on-error: true
         env:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          DIGEST: ${{ steps.digest.outputs.digest }}
         run: |
+          PINNED="docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ matrix.component }}@$DIGEST"
+
           echo "${{ secrets.DOCKERHUB_TOKEN }}" \
             | docker login docker.io -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
 
           printf '%s\n' "${{ secrets.COSIGN_PRIVATE_KEY }}" > cosign.key
-          cosign sign --key cosign.key --yes "$FINAL_IMAGE"
-          cosign attach sbom --sbom sbom/sbom-${{ matrix.component }}.json "$FINAL_IMAGE"
+          cosign sign --key cosign.key --yes "$PINNED"
+          cosign attach sbom --sbom sbom/sbom-${{ matrix.component }}.json "$PINNED"
           rm -f cosign.key
           docker logout docker.io
 
@@ -48,11 +81,12 @@ jobs:
         if: always()
         run: |
           if [ "${{ steps.sign.outcome }}" == "success" ]; then
-            echo "✅ sign (${{ matrix.component }}): signed image at $FINAL_IMAGE" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "✅ sign (${{ matrix.component }}): signed $FINAL_IMAGE @ ${{ steps.digest.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             REASON="see job log"
             [ "${{ steps.cosign-setup.outcome }}" != "success" ] && REASON="could not install cosign"
-            [ "${{ steps.sign.outcome }}" != "success" ] && [ "${{ steps.cosign-setup.outcome }}" == "success" ] && REASON="cosign signing or SBOM attach failed"
+            [ "${{ steps.digest.outcome }}" != "success" ] && REASON="could not resolve the promoted image digest on Docker Hub"
+            [ "${{ steps.sign.outcome }}" != "success" ] && [ "${{ steps.digest.outcome }}" == "success" ] && REASON="cosign signing or SBOM attach failed"
             echo "❌ sign (${{ matrix.component }}): failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi

@@ -35,14 +35,45 @@ jobs:
           git config user.email "pipeline-bot@ci"
           git config user.name "pipeline-bot"
 
-      - name: Bump image tags
-        id: bump
+      - name: Resolve promoted image digests
+        id: resolve
         if: steps.clone.outcome == 'success'
         continue-on-error: true
-        working-directory: manifests
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          sed -i "s#newTag: .*#newTag: ${{ github.sha }}#" overlays/production/backend/kustomization.yaml
-          sed -i "s#newTag: .*#newTag: ${{ github.sha }}#" overlays/production/frontend/kustomization.yaml
+          set -euo pipefail
+          for component in backend frontend; do
+            ref="docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${component}:${{ github.sha }}"
+            digest="$(skopeo inspect --tls-verify --creds "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" \
+                       --format '{{.Digest}}' "docker://$ref")"
+            case "$digest" in
+              sha256:*) ;;
+              *) echo "::error::unexpected digest '$digest' for $ref"; exit 1 ;;
+            esac
+            echo "digest_${component}=$digest" >> "$GITHUB_OUTPUT"
+            echo "$component: $ref -> $digest"
+          done
+
+      - name: Bump image refs to digests
+        id: bump
+        if: steps.resolve.outcome == 'success'
+        continue-on-error: true
+        working-directory: manifests
+        env:
+          BACKEND_DIGEST: ${{ steps.resolve.outputs.digest_backend }}
+          FRONTEND_DIGEST: ${{ steps.resolve.outputs.digest_frontend }}
+        run: |
+          set -euo pipefail
+          # The alternation on (newTag|digest) is load-bearing: after the
+          # first run the file already says `digest:`, so a `newTag:`-only
+          # pattern silently no-ops and CI would open a PR pinning a STALE
+          # digest. Verified against the real manifest repo.
+          sed -E -i "s#^([[:space:]]*)(newTag|digest): .*#\1digest: ${BACKEND_DIGEST}#" \
+            overlays/production/backend/kustomization.yaml
+          sed -E -i "s#^([[:space:]]*)(newTag|digest): .*#\1digest: ${FRONTEND_DIGEST}#" \
+            overlays/production/frontend/kustomization.yaml
           git diff --stat
           git diff
 
@@ -59,15 +90,23 @@ jobs:
             overlays/production/backend/kustomization.yaml
             overlays/production/frontend/kustomization.yaml
           delete-branch: true
-          commit-message: "bump backend+frontend to ${{ github.sha }}"
-          title: "Deploy ${{ github.sha }} (backend + frontend)"
+          commit-message: "pin backend+frontend to immutable digests (${{ github.sha }})"
+          title: "Pin backend+frontend to ${{ github.sha }} (backend + frontend)"
           body: |
-            Automated image-tag bump from [`${{ github.repository }}`@`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}).
+            Automated digest-pinned image bump from [`${{ github.repository }}`@`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}).
 
-            | Component | Image |
+            The images are pinned **by digest** (`@sha256:…`), not by the
+            mutable `${{ github.sha }}` tag. Kustomize emits these as
+            `image: docker.io/…@sha256:…`, so a re-push of the same tag can
+            no longer change what ArgoCD deploys.
+
+            | Component | Image (digest-pinned) |
             | --- | --- |
-            | backend | `docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/backend:${{ github.sha }}` |
-            | frontend | `docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/frontend:${{ github.sha }}` |
+            | backend | `docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/backend@${{ steps.resolve.outputs.digest_backend }}` |
+            | frontend | `docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/frontend@${{ steps.resolve.outputs.digest_frontend }}` |
+
+            Readable aliases for the same commit still exist on Docker Hub
+            under `:${{ github.sha }}`.
 
             Both images passed every gate before this PR was raised:
             gitleaks, lint, unit tests, SonarQube Quality Gate, Syft SBOM,
@@ -84,13 +123,14 @@ jobs:
               echo "✅ manifest: PR #${{ steps.pr.outputs.pull-request-number }} opened — review and merge to deploy" | tee -a "$GITHUB_STEP_SUMMARY"
               echo "${{ steps.pr.outputs.pull-request-number }}" >> "$GITHUB_STEP_SUMMARY"
             else
-              echo "ℹ️ manifest: tag already current — no PR needed" | tee -a "$GITHUB_STEP_SUMMARY"
+              echo "ℹ️ manifest: digests already current — no PR needed" | tee -a "$GITHUB_STEP_SUMMARY"
             fi
           else
             REASON="see job log"
             [ "${{ steps.cfg.outcome }}" != "success" ] && REASON="MANIFEST_REPO not set (Variable or Secret) — no repo slug to clone"
             [ "${{ steps.clone.outcome }}" != "success" ] && [ "${{ steps.cfg.outcome }}" == "success" ] && REASON="could not clone manifest repo — check MANIFEST_REPO_TOKEN scope and repo name"
-            [ "${{ steps.bump.outcome }}" != "success" ] && [ "${{ steps.clone.outcome }}" == "success" ] && REASON="failed to update kustomization.yaml — check paths"
+            [ "${{ steps.resolve.outcome }}" != "success" ] && [ "${{ steps.clone.outcome }}" == "success" ] && REASON="could not resolve the promoted image digest on Docker Hub — the image may not have been promoted"
+            [ "${{ steps.bump.outcome }}" != "success" ] && [ "${{ steps.resolve.outcome }}" == "success" ] && REASON="failed to update kustomization.yaml — check paths"
             [ "${{ steps.pr.outcome }}" != "success" ] && [ "${{ steps.bump.outcome }}" == "success" ] && REASON="could not open the pull request — the token pushed the branch but GitHub refused the PR. 'Resource not accessible by personal access token' means MANIFEST_REPO_TOKEN lacks the pull-request scope: fine-grained PATs need 'Pull requests: Read & write' (classic PATs need 'repo'). If the scope is already right, the PAT is probably scoped to the wrong repository."
             echo "❌ manifest: failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
