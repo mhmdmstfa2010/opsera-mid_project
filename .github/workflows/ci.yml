@@ -93,11 +93,15 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # the called workflow uploads the Grype SARIF to code scanning; without
+      # this the upload fails with "Resource not accessible by integration"
+      security-events: write
     needs: [build]
     if: github.event_name == 'push'
     uses: ./.github/workflows/gate-3-sbom-grype.yml
     secrets: inherit
 
+  
   # Gate 4 runs after Gate 3 so the gates execute in numbered order and so a
   # Gate 3 failure stops the (comparatively cheap) ACS scan from running at
   # all. Gate 4 reads no artifact from Gate 3 — it does its own `roxctl image
