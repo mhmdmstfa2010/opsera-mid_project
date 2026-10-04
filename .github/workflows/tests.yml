@@ -40,13 +40,14 @@ jobs:
         working-directory: frontend
         run: |
           npm ci
-          # --passWithNoTests: this repo currently has no frontend test
-          # files, and Jest exits 1 on "No tests found" which failed the
-          # whole test job. Coverage still lands in coverage/lcov.info
-          # (Jest default) whenever tests do exist.
+          # --passWithNoTests: Jest exits 1 on "No tests found", which would
+          # fail the whole test job before any result could be published.
+          # (The frontend DOES have suites under frontend/src — the flag is
+          # belt-and-braces, not a workaround for their absence.)
+          # Coverage still lands in coverage/lcov.info (Jest default).
           #
           # --reporters: jest-junit writes frontend/junit.xml, the file the
-          # test-reporter step below reads. Without it only the backend
+          # dorny/test-reporter step below reads. Without it only the backend
           # results would ever be published. `default` is kept so the
           # console output is unchanged.
           npm test -- --coverage --watchAll=false --passWithNoTests --ci \
@@ -92,30 +93,54 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-      - name: Publish test results
+      # dorny/test-reporter REPLACES EnricoMi/publish-unit-test-result-action.
+      # Running both would publish the same XML twice as two competing check
+      # runs on every commit.
+      #
+      # Two invocations, not one: `reporter` is a single required format and
+      # the action rejects a `path` whose files are not all the same format.
+      # Surefire emits Java JUnit XML and jest-junit emits its own dialect, so
+      # each needs its own step.
+      #
+      # Pinned to the immutable commit SHA for the v3.0.0 tag (2026-03-21)
+      # rather than the moving `@v3` ref, per this repo's no-floating-pin rule.
+      - name: Publish backend test results
+        id: report-backend-results
         if: ${{ !cancelled() }}
-        uses: EnricoMi/publish-unit-test-result-action@v2
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
         with:
-          files: |
-            backend/target/surefire-reports/TEST-*.xml
-            frontend/junit.xml
-          check_name: Test Results
-          report_individual_runs: "true"
-          # The per-suite table is printed by the "📊 CI summary" aggregator
-          # job; this job stays SHORT so the numbers are not shown twice.
-          # The commit check, the per-failure annotations and the PR comment
-          # are all unaffected by turning the job summary off here.
-          job_summary: "false"
-          check_run: "true"
-          comment_mode: changes
-          # A glob that matches nothing is a warning, not a failure — the
-          # frontend has no test files yet and the backend glob is expected
-          # to supply the results.
-          fail_on: test failures
-          # Reporting only — the verdict for this job comes from the pass/fail
-          # step below, and this action never fails the build on test failures
-          # by default.
-          action_fail: "false"
+          name: Test Results (backend)
+          reporter: java-junit
+          path: backend/target/surefire-reports/TEST-*.xml
+          # The full per-suite table is printed by the "📊 CI summary"
+          # aggregator; this job stays SHORT so numbers are not shown twice.
+          # The commit check and the per-failure annotations are unaffected.
+          use-actions-summary: "false"
+          list-suites: none
+          list-tests: failed
+          max-annotations: "10"
+          # Reporting only — this job's verdict comes from the pass/fail step
+          # below, which is what decides the build.
+          fail-on-error: "false"
+
+      - name: Publish frontend test results
+        id: report-frontend-results
+        if: ${{ !cancelled() }}
+        uses: dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2 # v3.0.0
+        with:
+          name: Test Results (frontend)
+          reporter: jest-junit
+          path: frontend/junit.xml
+          use-actions-summary: "false"
+          list-suites: none
+          list-tests: failed
+          max-annotations: "10"
+          fail-on-error: "false"
+          # REQUIRED here. Verified: jest-junit still writes junit.xml when
+          # every suite is skipped, but it contains zero testcases, and
+          # `fail-on-empty` defaults to TRUE — so without this the frontend
+          # step would fail the whole job on a green run.
+          fail-on-empty: "false"
 
       # SHORT summary: verdict + headline count + links. The full per-suite
       # table is produced by the "📊 CI summary" aggregator job.

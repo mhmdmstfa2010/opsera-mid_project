@@ -159,7 +159,7 @@ Two independent layers, both driven by real data — never console scraping.
 
 | Layer | What it produces |
 | ----- | ---------------- |
-| `tests` job — [`publish-unit-test-result-action`](https://github.com/EnricoMi/publish-unit-test-result-action) | A `Test Results` check on the commit, an annotation per failure, a PR comment when the numbers change, and a per-suite table in the job summary |
+| `tests` job — [`dorny/test-reporter`](https://github.com/dorny/test-reporter) (pinned to the v3.0.0 commit SHA) | A `Test Results (backend)` and `Test Results (frontend)` check on the commit, plus an annotation per failed test. Replaces `EnricoMi/publish-unit-test-result-action`, which would otherwise publish the same XML as a second, competing check run |
 | `📊 CI summary` job — [`.github/scripts/generate-ci-summary.py`](.github/scripts/generate-ci-summary.py) | The combined dashboard below: tests, suites, failures, run-over-run delta, SonarQube, and the generated README block |
 
 ```
