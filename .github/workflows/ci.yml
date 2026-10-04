@@ -73,12 +73,17 @@ jobs:
     uses: ./.github/workflows/gate-3-sbom-grype.yml
     secrets: inherit
 
+  # Gate 4 runs after Gate 3 so the gates execute in numbered order and so a
+  # Gate 3 failure stops the (comparatively cheap) ACS scan from running at
+  # all. Gate 4 reads no artifact from Gate 3 — it does its own `roxctl image
+  # check`/`scan` against GHCR — so this ordering is about fail-fast, not data.
+  # The cost is that the two longest jobs can no longer overlap.
   acs-check:
     name: Gate 4 · ACS
     permissions:
       contents: read
       packages: write
-    needs: [build]
+    needs: [build, sbom-scan]
     if: github.event_name == 'push'
     uses: ./.github/workflows/gate-4-acs.yml
     secrets: inherit
@@ -115,8 +120,17 @@ jobs:
   #
   ci-summary:
     name: 📊 CI summary
-    needs: [test, sonarqube]
-    if: ${{ !cancelled() }}
+    # Terminal job: needs the end of the delivery chain, not just [test,
+    # sonarqube]. `update-manifest` transitively depends on every gate
+    # (gitleaks, lint, test -> sonarqube -> build -> sbom-scan -> acs-check ->
+    # promote -> sign -> update-manifest), so this now waits for all of them.
+    #
+    # `always()` is required, not decorative: `update-manifest` is gated on
+    # `github.event_name == 'push'`, so on a pull_request it is SKIPPED, and
+    # any Gate 4 failure skips promote -> sign -> manifest. Without `always()`
+    # the summary would be skipped in exactly the cases it exists to explain.
+    needs: [update-manifest]
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
