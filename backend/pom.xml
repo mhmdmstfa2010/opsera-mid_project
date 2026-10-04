@@ -27,8 +27,17 @@
              XMLGregorianCalendar unbounded number parse DoS, High) plus two
              Medium advisories; all three are fixed in 2.21.6. That advisory
              was published on 2026-09-28, which is why Gate 3 (Grype, fixable
-             >= high) turned red on an image whose code had not changed. -->
-        <jackson-bom.version>2.21.6</jackson-bom.version>
+             >= high) turned red on an image whose code had not changed.
+
+             2.21.6 is in turn affected by two more High availability-only
+             DoS advisories, both published 2026-09-30 and both fixed in
+             2.21.7:
+               GHSA-cxp5-3px4-pw24 (quadratic forward-reference completion)
+               GHSA-wv8q-qhhj-9h54 (retains every unknown raw type ID)
+             2.21.7 is the newest release on Maven Central; there is no
+             2.21.8. Same story as 2.21.5 -> 2.21.6: a new advisory turns a
+             previously clean image red with no code change. -->
+        <jackson-bom.version>2.21.7</jackson-bom.version>
         <log4j2.version>2.25.5</log4j2.version>
     </properties>
     <dependencies>
