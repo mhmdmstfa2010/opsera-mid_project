@@ -1,3 +1,25 @@
+# ==============================================================================
+# gate-2-sonarqube.yml
+# ==============================================================================
+# FUNCTION
+#   Runs the SonarQube analysis against the EC2 SonarQube instance and enforces
+#   the Quality Gate, failing the job if the gate is red.
+#
+# ROLE IN PIPELINE
+#   Gate 2 - static analysis and quality gate.
+#
+# SECRETS READ
+#   - SONAR_HOST_URL
+#   - SONAR_TOKEN
+#
+# REPOSITORY VARIABLES READ
+#   (none)
+#
+# NOTES
+#   SONAR_HOST_URL points at the self-hosted SonarQube (https://34.230.188.247).
+#   The scanner task file is exported as an artifact for the ci-summary job.
+# ==============================================================================
+
 name: gate-2-sonarqube
 
 on:

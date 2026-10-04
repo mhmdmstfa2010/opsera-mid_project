@@ -1,3 +1,24 @@
+# ==============================================================================
+# gate-0-gitleaks.yml
+# ==============================================================================
+# FUNCTION
+#   Scans the repository history and working tree for committed secrets with
+#   gitleaks and uploads any findings to GitHub code scanning as SARIF.
+#
+# ROLE IN PIPELINE
+#   Gate 0 - secret scanning. Runs in parallel with lint and tests.
+#
+# SECRETS READ
+#   - GITHUB_TOKEN
+#
+# REPOSITORY VARIABLES READ
+#   (none)
+#
+# NOTES
+#   Findings are published to Security -> Code scanning, so they are browsable
+#   rather than only visible in the job log.
+# ==============================================================================
+
 name: gate-0-gitleaks
 
 on:

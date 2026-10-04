@@ -1,3 +1,27 @@
+# ==============================================================================
+# promote.yml
+# ==============================================================================
+# FUNCTION
+#   Copies the scanned images from GHCR to Docker Hub, which is the registry the
+#   cluster pulls from. Runs only after both Gate 3 and Gate 4 have passed.
+#
+# ROLE IN PIPELINE
+#   Promotes scanned images GHCR -> Docker Hub (matrix: backend, frontend).
+#
+# SECRETS READ
+#   - GITHUB_TOKEN
+#   - DOCKERHUB_USERNAME
+#   - DOCKERHUB_TOKEN
+#
+# REPOSITORY VARIABLES READ
+#   - DOCKERHUB_NAMESPACE
+#
+# NOTES
+#   skopeo performs the copy. The digest is preserved across it, which is what
+#   lets the downstream jobs pin the Docker Hub image by digest.
+#   DOCKERHUB_NAMESPACE selects the destination namespace.
+# ==============================================================================
+
 name: promote
 
 on:

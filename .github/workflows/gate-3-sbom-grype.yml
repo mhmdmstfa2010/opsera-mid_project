@@ -1,3 +1,27 @@
+# ==============================================================================
+# gate-3-sbom-grype.yml
+# ==============================================================================
+# FUNCTION
+#   Pulls the staged image from GHCR, generates a CycloneDX SBOM with Syft, and
+#   scans it with Grype, failing on fixable vulnerabilities at or above the
+#   severity threshold.
+#
+# ROLE IN PIPELINE
+#   Gate 3 - SBOM generation and vulnerability scanning.
+#
+# SECRETS READ
+#   - GITHUB_TOKEN
+#
+# REPOSITORY VARIABLES READ
+#   (none)
+#
+# NOTES
+#   Severity threshold is set by the GRYPE_SEVERITY_THRESHOLD env var (high).
+#   Results are uploaded both as a SARIF artifact and to code scanning.
+#   The SBOM artifact produced here is a hard input to the cosign sign job,
+#   which attaches it to the image.
+# ==============================================================================
+
 name: gate-3-sbom-grype
 
 on:

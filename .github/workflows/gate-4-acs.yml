@@ -1,3 +1,27 @@
+# ==============================================================================
+# gate-4-acs.yml
+# ==============================================================================
+# FUNCTION
+#   Runs the RHACS Central policy check and image scan against the staged image
+#   using roxctl, failing the job on any policy violation.
+#
+# ROLE IN PIPELINE
+#   Gate 4 - RHACS policy compliance.
+#
+# SECRETS READ
+#   - ROX_API_TOKEN
+#   - ROX_CENTRAL_ENDPOINT
+#
+# REPOSITORY VARIABLES READ
+#   (none)
+#
+# NOTES
+#   roxctl is installed from a pinned URL (4.11.4) and authenticates with
+#   ROX_API_TOKEN via environment variables. This job consumes no artifact from
+#   Gate 3: it scans the GHCR image independently, which is why sequencing it
+#   after Gate 3 is a fail-fast optimisation rather than a data dependency.
+# ==============================================================================
+
 name: gate-4-acs
 
 on:

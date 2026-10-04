@@ -1,3 +1,23 @@
+# ==============================================================================
+# gate-1-lint.yml
+# ==============================================================================
+# FUNCTION
+#   Runs the linters for both components (backend and frontend) against the
+#   checked-out working tree.
+#
+# ROLE IN PIPELINE
+#   Gate 1 - lint. Runs in parallel with gitleaks and tests.
+#
+# SECRETS READ
+#   (none)
+#
+# REPOSITORY VARIABLES READ
+#   (none)
+#
+# NOTES
+#   Reads no secrets and no repository variables: it only needs the source.
+# ==============================================================================
+
 name: gate-1-lint
 
 on:

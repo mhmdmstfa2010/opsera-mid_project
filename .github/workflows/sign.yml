@@ -1,3 +1,29 @@
+# ==============================================================================
+# sign.yml
+# ==============================================================================
+# FUNCTION
+#   Resolves the promoted Docker Hub image to an immutable digest and signs it
+#   with cosign, attaching the SBOM produced by Gate 3 as an attestation.
+#
+# ROLE IN PIPELINE
+#   Signs the promoted images and attaches their SBOM (matrix: backend, frontend).
+#
+# SECRETS READ
+#   - DOCKERHUB_USERNAME
+#   - DOCKERHUB_TOKEN
+#   - COSIGN_PASSWORD
+#   - COSIGN_PRIVATE_KEY
+#
+# REPOSITORY VARIABLES READ
+#   - DOCKERHUB_NAMESPACE
+#
+# NOTES
+#   The digest is resolved with `skopeo inspect --tls-verify` and the image is
+#   signed by digest reference, because a cosign signature is bound to the
+#   digest rather than to a tag.
+#   COSIGN_PRIVATE_KEY is the signing key; COSIGN_PASSWORD decrypts it.
+# ==============================================================================
+
 name: sign
 
 on:

@@ -1,3 +1,28 @@
+# ==============================================================================
+# build.yml
+# ==============================================================================
+# FUNCTION
+#   Builds the backend and frontend images and pushes them to GHCR, where the
+#   later gates scan them and promote copies them from.
+#
+# ROLE IN PIPELINE
+#   Builds and stages images (matrix: backend, frontend).
+#
+# SECRETS READ
+#   - GITHUB_TOKEN
+#
+# REPOSITORY VARIABLES READ
+#   (none)
+#
+# NOTES
+#   Uses docker/build-push-action pinned to a commit SHA. `provenance: false` is
+#   deliberate: provenance wraps the image in an OCI index, which changes the
+#   digest and would decouple the digest signed by cosign and recorded in the
+#   manifest PR from the image the gates actually scanned.
+#   Images are tagged with the commit SHA, which is already immutable and is
+#   the handle Gate 3, Gate 4 and promote resolve by.
+# ==============================================================================
+
 name: build
 
 on:

@@ -1,3 +1,25 @@
+# ==============================================================================
+# tests.yml
+# ==============================================================================
+# FUNCTION
+#   Runs the backend (JUnit/Surefire + JaCoCo) and frontend (Jest) test suites,
+#   then publishes the results as commit checks via dorny/test-reporter.
+#
+# ROLE IN PIPELINE
+#   Unit tests. Runs in parallel with gitleaks and lint.
+#
+# SECRETS READ
+#   (none)
+#
+# REPOSITORY VARIABLES READ
+#   (none)
+#
+# NOTES
+#   Reads no secrets and no repository variables. Two publisher steps are used
+#   because Surefire emits Java JUnit XML and jest-junit emits its own dialect,
+#   and test-reporter takes exactly one `reporter` format per invocation.
+# ==============================================================================
+
 name: tests
 
 on:

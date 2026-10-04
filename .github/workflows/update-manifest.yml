@@ -1,3 +1,33 @@
+# ==============================================================================
+# update-manifest.yml
+# ==============================================================================
+# FUNCTION
+#   Clones the GitOps manifest repo, rewrites the backend and frontend image
+#   references to immutable digests, and opens a pull request for a human to
+#   review and merge. It never deploys and never touches the cluster.
+#
+# ROLE IN PIPELINE
+#   Final stage - raises the digest-pinned manifest bump PR.
+#
+# SECRETS READ
+#   - MANIFEST_REPO_TOKEN
+#   - MANIFEST_REPO
+#   - DOCKERHUB_USERNAME
+#   - DOCKERHUB_TOKEN
+#
+# REPOSITORY VARIABLES READ
+#   - MANIFEST_REPO
+#   - DOCKERHUB_NAMESPACE
+#
+# NOTES
+#   MANIFEST_REPO may be provided as EITHER a variable or a secret; the workflow
+#   accepts `vars.MANIFEST_REPO || secrets.MANIFEST_REPO`.
+#   The rewrite writes a kustomize `digest:` field. It must NOT be written into
+#   `newTag:` - kustomize would accept a sha256 value there and emit a *tag*
+#   that cannot be resolved. The pattern matches (newTag|digest) so re-runs do
+#   not silently no-op and pin a stale digest.
+# ==============================================================================
+
 name: propose-manifest-bump
 
 on:

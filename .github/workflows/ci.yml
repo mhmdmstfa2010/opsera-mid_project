@@ -1,3 +1,28 @@
+# ==============================================================================
+# ci.yml
+# ==============================================================================
+# FUNCTION
+#   The only event-triggered workflow: defines the whole 11-job DAG and calls every
+#   other workflow in this directory as a reusable `workflow_call` job.
+#
+# ROLE IN PIPELINE
+#   Pipeline entry point. Triggers on push/PR to main and orchestrates the gates.
+#
+# SECRETS READ
+#   - GITHUB_TOKEN
+#   - SONAR_HOST_URL
+#   - SONAR_TOKEN
+#
+# REPOSITORY VARIABLES READ
+#   (none)
+#
+# NOTES
+#   Jobs run strictly in order: gitleaks/lint/test -> sonarqube -> build ->
+#   sbom-scan -> acs-check -> promote -> sign -> update-manifest -> ci-summary.
+#   ci-summary is terminal (needs update-manifest, if: always()) so it reports
+#   the whole pipeline and still renders when an earlier gate fails.
+# ==============================================================================
+
 name: ci
 
 on:
