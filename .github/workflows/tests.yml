@@ -134,11 +134,13 @@ jobs:
           name: Test Results (backend)
           reporter: java-junit
           path: backend/target/surefire-reports/TEST-*.xml
-          # The full per-suite table is printed by the "📊 CI summary"
-          # aggregator; this job stays SHORT so numbers are not shown twice.
-          # The commit check and the per-failure annotations are unaffected.
-          use-actions-summary: "false"
-          list-suites: none
+          # Renders the per-suite table into THIS job's step summary. The same
+          # markdown is captured from $GITHUB_STEP_SUMMARY below and shipped to
+          # the "📊 CI summary" job as an artifact, so the tables appear in
+          # both places. (test-reporter v3 has no `summary-path` input; the
+          # step-summary file is the supported way to move it between jobs.)
+          use-actions-summary: "true"
+          list-suites: all
           list-tests: failed
           max-annotations: "10"
           # Reporting only — this job's verdict comes from the pass/fail step
@@ -153,8 +155,8 @@ jobs:
           name: Test Results (frontend)
           reporter: jest-junit
           path: frontend/junit.xml
-          use-actions-summary: "false"
-          list-suites: none
+          use-actions-summary: "true"
+          list-suites: all
           list-tests: failed
           max-annotations: "10"
           fail-on-error: "false"
@@ -164,8 +166,29 @@ jobs:
           # step would fail the whole job on a green run.
           fail-on-empty: "false"
 
-      # SHORT summary: verdict + headline count + links. The full per-suite
-      # table is produced by the "📊 CI summary" aggregator job.
+      # Ship the rendered test-reporter markdown to the "📊 CI summary" job.
+      # $GITHUB_STEP_SUMMARY is the only cross-job channel available: v3 of the
+      # action has no `summary-path` input, and its check-run annotations are
+      # not readable by a downstream job. Uploading the file lets ci-summary
+      # inline the same per-suite tables into its own report.
+      - name: Export the rendered test report for the CI summary job
+        if: always()
+        run: |
+          mkdir -p test-report-md
+          cp "$GITHUB_STEP_SUMMARY" test-report-md/tests.md
+          echo "exported $(wc -c < test-report-md/tests.md) bytes of test report"
+
+      - uses: actions/upload-artifact@v4
+        id: upload-test-report-md
+        if: always()
+        with:
+          name: test-report-md
+          path: test-report-md/tests.md
+          retention-days: 7
+          if-no-files-found: warn
+
+      # SHORT summary: verdict + headline count + links. The per-suite tables are
+      # rendered above and are also inlined into the "📊 CI summary" job.
       - name: Pass/fail message
         if: always()
         env:

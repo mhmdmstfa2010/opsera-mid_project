@@ -179,6 +179,12 @@ jobs:
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
+          name: test-report-md
+          path: test-report-md
+
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
           name: sonar-report-task
           path: sonar-report-task
 
@@ -227,6 +233,25 @@ jobs:
             --update-readme README.md \
             --commit "${{ github.sha }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      # Inline the per-suite test tables rendered by dorny/test-reporter in the
+      # `tests` job, so the whole test picture is visible in one report. The
+      # generated metrics table above stays as the roll-up; this adds the
+      # per-suite detail beneath it.
+      - name: Inline the detailed test report
+        if: always()
+        run: |
+          if [ -s test-report-md/tests.md ]; then
+            {
+              echo "### 🧾 Detailed test report"
+              echo ""
+              cat test-report-md/tests.md
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "inlined $(wc -c < test-report-md/tests.md) bytes of per-suite detail"
+          else
+            echo "::warning::no test-report-md artifact — skipping the detailed report"
+          fi
 
       - name: Add report links
         if: always()
