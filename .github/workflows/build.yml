@@ -19,33 +19,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build image
-        id: build
-        continue-on-error: true
-        run: docker build -t "$GHCR_IMAGE" ./${{ matrix.component }}
+      # buildx is required by docker/build-push-action. Pinned to immutable
+      # commit SHAs rather than floating tags, per this repo's pin policy.
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GHCR
         id: ghcr-login
-        if: steps.build.outcome == 'success'
         continue-on-error: true
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push to GHCR (staging hand-off)
-        id: push-ghcr
+      # Builds and pushes in one step, and exposes the resulting digest as a
+      # step output instead of scraping it out of `docker push` text.
+      #
+      # `provenance: false` is deliberate and load-bearing. With provenance
+      # enabled the tag points at an OCI *index* wrapping the image plus an
+      # attestation manifest, which changes the digest: verified locally, the
+      # same Dockerfile pushed with and without --provenance produced
+      # sha256:284a4985... vs sha256:1c695740.... The digest recorded by the
+      # manifest PR and by cosign would then no longer describe the image the
+      # gates scanned. Turning it off keeps the digest identical to what the
+      # previous `docker build` + `docker push` produced.
+      #
+      # The `:${{ github.sha }}` tag stays as the handle that Gate 3, Gate 4
+      # and promote resolve the image by. It is already immutable — a commit
+      # SHA never changes — and a digest cannot be used as a tag because it
+      # only exists once the image has been pushed.
+      - name: Build and push image to GHCR (staging hand-off)
+        id: build
         if: steps.ghcr-login.outcome == 'success'
         continue-on-error: true
-        run: docker push "$GHCR_IMAGE"
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./${{ matrix.component }}
+          file: ./${{ matrix.component }}/Dockerfile
+          push: true
+          tags: ${{ env.GHCR_IMAGE }}
+          provenance: false
 
       - name: Pass/fail message
         if: always()
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          if [ "${{ steps.push-ghcr.outcome }}" == "success" ]; then
-            echo "✅ build (${{ matrix.component }}): image built and staged at $GHCR_IMAGE" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.build.outcome }}" == "success" ]; then
+            {
+              echo "✅ build (${{ matrix.component }}): image built and staged at $GHCR_IMAGE"
+              [ -n "$IMAGE_DIGEST" ] && echo "digest: \`$IMAGE_DIGEST\`"
+              echo ""
+            } | tee -a "$GITHUB_STEP_SUMMARY"
           else
             REASON="see job log"
-            [ "${{ steps.build.outcome }}" != "success" ] && REASON="docker build failed"
-            [ "${{ steps.ghcr-login.outcome }}" != "success" ] && [ "${{ steps.build.outcome }}" == "success" ] && REASON="GHCR login failed"
-            [ "${{ steps.push-ghcr.outcome }}" != "success" ] && [ "${{ steps.ghcr-login.outcome }}" == "success" ] && REASON="GHCR push failed"
+            [ "${{ steps.ghcr-login.outcome }}" != "success" ] && REASON="GHCR login failed"
+            [ "${{ steps.build.outcome }}" != "success" ] && [ "${{ steps.ghcr-login.outcome }}" == "success" ] && REASON="image build or push failed"
             echo "❌ build (${{ matrix.component }}): failed — $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
